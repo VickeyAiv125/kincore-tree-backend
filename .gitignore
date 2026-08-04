@@ -1,0 +1,9 @@
+node_modules
+.env
+# Local scratch / one-off scripts (may contain secrets)
+scratch/
+check_*.js
+check_*.cjs
+debug_*.js
+verify_db_rels.js
+create_backup_table.js

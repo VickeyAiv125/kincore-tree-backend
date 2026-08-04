@@ -1,0 +1,12 @@
+[
+  {
+    "id": "f8deb30e-89c4-41f2-b55d-89c4265e77bc",
+    "actor_id": "18605dd1-c4d0-4bfd-8a92-85f2799a7dfe",
+    "action": "TEST_ACTION",
+    "target_type": "test_target",
+    "target_id": null,
+    "details": null,
+    "ip_address": null,
+    "created_at": "2026-05-03T16:47:22.528+00:00"
+  }
+]

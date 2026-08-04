@@ -1,0 +1,336 @@
+1.6 Background Job Control — System Worker Pool
+This page is the DevOps/Admin operational control center for all background jobs running inside Kincore.
+It should be part of the Platform Admin Portal / DevOps Panel, not the Family Admin Panel. Family Admins should not access this page. Based on the PRD permission matrix, only Super Admin and DevOps Admin should be able to access Background Job Control.
+A background job is a system task that runs behind the scenes without blocking the user experience. These jobs are required because Kincore has many heavy, scheduled, recurring, or reliability-sensitive processes such as PDF generation, media processing, storage recalculation, subscription sync, KCC Coin reconciliation, webhook retry, audit log archival, and database backup.
+This page should allow DevOps to monitor, control, retry, pause, resume, schedule, and audit those background processes.
+
+1. Active Worker Pool
+The Active Worker Pool badge shows whether the background job system is currently healthy.
+Possible statuses should include:
+Active — workers are online and processing jobs normally.
+Degraded — some jobs are delayed, some workers are unhealthy, or queue backlog is increasing.
+Paused — job processing has been intentionally paused.
+Offline — no worker is currently available.
+Overloaded — queue backlog, runtime, or failure rate is above threshold.
+This status should be calculated based on:
+Worker heartbeat
+Queue backlog
+Failed job rate
+Average runtime
+Last processed timestamp
+Dead-letter queue count
+This aligns with the PRD requirement for background job monitoring, queue backlog monitoring, and platform reliability operations.
+
+2. Schedule Job Button
+The Schedule Job button is used by DevOps to create or update system-level scheduled jobs.
+It should support:
+Job name
+Job type
+Description
+Schedule type
+Cron expression
+Run once / recurring / event-triggered
+Worker group
+Priority
+Retry policy
+Timeout limit
+Concurrency limit
+Environment: production / staging / testing
+Enabled / disabled status
+Example scheduled jobs:
+Daily database backup
+Storage usage recalculation
+Subscription status sync
+Audit log archival
+Temporary PDF cleanup
+Story expiration cleanup
+KCC Coin reconciliation
+Webhook retry processing
+Dead-letter queue recovery
+For production jobs, schedule changes must require a reason, confirmation, and audit log.
+
+3. Search and Filter
+The search bar should allow DevOps to search jobs by:
+Job ID
+Job name
+Worker group
+Description
+Related user ID
+Related family space ID
+Related request ID
+Related transaction ID
+Last error message
+The status filter should support:
+Running
+Success
+Failed
+Retrying
+Pending
+Scheduled
+Paused
+Cancelled
+Timeout
+Stuck
+Dead-lettered
+This helps DevOps quickly locate failed, delayed, or risky background processes.
+
+4. Job Rows in the Table
+Each row represents one system job.
+JOB-BACKUP — Daily DB Backup
+This job handles automated database backups.
+Functionality:
+Run daily backup
+Verify backup completion
+Store backup metadata
+Track backup status
+Alert DevOps if backup fails
+Support restore-plan readiness
+This directly matches the PRD requirement for automated daily backups and restore plan.
+
+JOB-THUMBNAIL — Media Thumbnail Compression
+This job processes uploaded media.
+Functionality:
+Compress uploaded photos or videos
+Generate thumbnails
+Optimize preview images
+Reduce media loading time
+Update media records after processing
+Example:
+User uploads an ancestor photo. The original file is stored in Supabase Storage or equivalent S3-compatible storage. The thumbnail job creates a smaller preview image so the app loads faster.
+This aligns with the PRD media repository requirement for upload, compression, thumbnail generation, and S3-compatible storage.
+
+JOB-STORAGE — Storage Usage Recalculation
+This job recalculates storage usage by Family Space.
+Functionality:
+Count uploaded media, documents, generated PDFs, and other stored files
+Update Family Space storage usage
+Compare usage against subscription quota
+Flag over-quota Family Spaces
+Support billing and plan enforcement
+Important clarification:
+This is not the same as DevOps infrastructure resource usage.
+ This job calculates Family Space business-level storage usage.
+
+JOB-SUBSCRIPTION — Subscription Status Sync
+This job syncs billing and subscription status.
+Functionality:
+Check active subscriptions
+Detect expired or failed payments
+Apply plan changes
+Update Family Space entitlements
+Update storage quota and feature access
+Support backend feature gating
+This aligns with the PRD pricing and monetization requirement that subscription tiers, feature flags, and backend gating must be enforced by backend logic.
+
+JOB-ABUSE — Abuse Report Aggregation
+This job aggregates abuse reports and trust/safety signals.
+Functionality:
+Group repeated reports
+Detect high-risk Family Spaces
+Escalate serious cases
+Feed cases into the Trust & Safety workflow
+Support L1/L2/L3 moderation workflow
+Support risk scoring
+This aligns with the PRD’s Trust, Safety & Abuse Workflow Engine and Family Space Risk Scoring module.
+
+JOB-PDF — PDF Report Cleanup / PDF Queue Support
+This job manages generated PDF reports.
+Functionality:
+Support descendant report generation queue
+Remove expired temporary PDFs
+Keep authorized downloadable reports
+Respect privacy rules
+Hide minors
+Honor field-level visibility
+Store generated files in object storage
+Important:
+PDF generation itself should run through the backend job queue. Cleanup is only one part of the PDF job lifecycle.
+This directly matches the PRD requirement that descendant report PDFs are generated by backend job queue and stored in object storage.
+
+JOB-AUDIT — Audit Log Archival
+This job archives old audit logs.
+Functionality:
+Move older logs into archive storage
+Preserve immutable audit history
+Reduce main database load
+Support audit export by authorized roles
+Retain sensitive action records such as config changes, wallet actions, moderation actions, refunds, and admin operations
+Important:
+Audit logs should not be casually deleted. They should be archived according to retention rules.
+This aligns with the PRD requirement that privileged actions must be audited and that audit logs must be immutable.
+
+Additional PRD-required jobs to include
+To avoid future conflict, the worker pool should also support these jobs:
+JOB-KCC-RECONCILIATION — reconcile KCC Coin ledger or external BigK API status
+JOB-WEBHOOK-RETRY — retry failed payment, coin, mall, or notification webhooks
+JOB-DEADLETTER-RECOVERY — review and reprocess permanently failed jobs
+JOB-STORY-EXPIRY — expire stories after 24/48/72 hours
+JOB-NOTIFICATION — send in-app, email, and push notifications
+JOB-MALL-SYNC — sync Mall orders, listings, fulfillment, or settlement status
+JOB-XP-ACHIEVEMENT — calculate XP and level updates from verified actions
+JOB-PUBLIC-SEARCH-INDEX — update opt-in public people search index
+
+5. Worker Column
+The worker column shows which worker group is responsible for the job.
+The screenshot currently shows Main Pod. To avoid infrastructure conflict, we should not use “Pod” unless the system is actually using Kubernetes.
+Recommended wording:
+Main Worker
+Backup Worker
+Media Worker
+Storage Worker
+PDF Worker
+Wallet Worker
+Webhook Worker
+Notification Worker
+Audit Worker
+Mall Worker
+This is safer and consistent with the PRD’s Node.js + Express + Supabase/PostgreSQL architecture.
+
+6. Status Column
+The status column shows the latest job state.
+Each job should record:
+Current status
+Last started time
+Last completed time
+Duration
+Retry count
+Failure reason
+Trigger source
+Related request ID
+Related incident ID, if applicable
+Example:
+JOB-KCC-RECONCILIATION failed because BigK API returned timeout. The job moves to retrying. If retries fail, it enters dead-letter queue and alerts DevOps.
+This is important because the PRD requires retry strategy, dead-letter queue, and reconciliation for KCC/payment-related integrations.
+
+7. Performance Column
+The performance column shows how well the job is running.
+Recommended metrics:
+Average duration
+Last run duration
+Success rate
+Failure rate
+Retry count
+Queue waiting time
+Timeout count
+Records processed
+Dead-letter count
+Example:
+If PDF generation normally takes 3 minutes but suddenly takes 30 minutes, DevOps can identify possible storage, database, or worker performance issues.
+
+8. Runtime Column
+The runtime column should show either:
+Last run time, for completed jobs
+Current running duration, for active jobs
+Failed time, for failed jobs
+Next scheduled run, for scheduled jobs
+Example:
+Running for 4m 12s
+ Failed 10 minutes ago
+ Next run: Today 2:00 AM
+
+9. Actions Column
+Each job should support controlled actions.
+Recommended actions:
+View Details
+Shows:
+Job definition
+Worker group
+Schedule
+Retry policy
+Timeout policy
+Last execution result
+Error message
+Related logs
+Related audit records
+Run Now
+Manually triggers the job.
+Example:
+DevOps manually runs storage recalculation after fixing a storage-counting issue.
+Pause
+Temporarily disables the job.
+Example:
+Pause PDF generation during storage migration.
+Resume
+Re-enables a paused job.
+Retry
+Retries a failed job.
+Example:
+Retry failed webhook delivery after external API recovers.
+Cancel
+Cancels a queued or running job, only if safe.
+Critical jobs such as payment, wallet, subscription, and audit jobs should require stronger confirmation.
+View Logs
+Opens Logs Explorer filtered by job ID.
+Example:
+Click JOB-STORAGE → View Logs → Logs Explorer opens with job_id=JOB-STORAGE.
+Edit Schedule
+Allows DevOps to update job schedule.
+This must be audited.
+
+10. Permission and Audit Rules
+This page must follow the PRD’s Platform Admin Portal access model.
+Allowed roles:
+Super Admin
+DevOps Admin
+Not allowed:
+Family Admin
+Branch Admin
+Editor
+Member
+Guest/Public
+Finance Admin, unless only viewing billing-related job results
+Moderation Admin, unless only viewing abuse-related job results
+Every manual action must be recorded in AuditLog:
+Actor
+Role
+Action
+Job ID
+Environment
+Old value
+New value
+Reason
+Timestamp
+Status
+Related incident ID, if any
+Examples:
+DevOps Admin manually retried JOB-WEBHOOK-RETRY.
+ DevOps Admin paused JOB-PDF.
+ Super Admin changed JOB-BACKUP schedule from 12:00 AM to 2:00 AM.
+
+11. Important PRD Conflict Avoidance
+To ensure no conflict with the PRD, please follow these rules:
+This page must remain inside Platform Admin / DevOps Panel only.
+ It must not be exposed to Family Admin Panel.
+Do not allow this page to mint, burn, or override KCC Coin ledger entries.
+ Kincore may monitor KCC activity, flag suspicious activity, trigger freeze via BigK API, and view reconciliation status, but treasury and tokenomics control remain in BigK Admin.
+Do not treat job actions as silent backend overrides.
+ All production job actions must be audited.
+Do not use AWS/Kubernetes-specific wording unless actually implemented.
+ Use neutral terms like Worker Group, Worker Service, and Object Storage.
+Do not delete audit logs through cleanup jobs.
+ Audit logs should be archived, not casually deleted.
+All payment, KCC, subscription, and webhook jobs must be idempotent.
+ Retrying the same job must not duplicate coin credit, payments, refunds, notifications, or subscription changes.
+All job failures that affect users should connect to Incident Management.
+ For example, failed subscription sync, failed KCC reconciliation, or failed PDF generation at scale should be escalatable into an incident.
+
+The System Worker Pool should be implemented as a full background job operations module under the Platform Admin / DevOps Panel.
+It should manage all asynchronous, scheduled, recurring, delayed, retryable, and reliability-sensitive system tasks required by the PRD, including:
+Backups
+Media processing
+Storage recalculation
+Subscription sync
+PDF generation and cleanup
+Audit archival
+Abuse aggregation
+Story expiry
+Webhook retry
+Dead-letter recovery
+KCC Coin reconciliation
+Mall sync
+Notifications
+Public search indexing
+XP/achievement calculation
+The key principle is:
+Any heavy, recurring, delayed, or failure-prone system process must run through the background job system, and DevOps must be able to monitor, retry, pause, resume, schedule, audit, and investigate it from this page.
+This is aligned with the PRD and does not conflict as long as access control, audit logging, KCC governance limits, and Platform Admin separation are respected.

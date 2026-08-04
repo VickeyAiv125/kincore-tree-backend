@@ -1,0 +1,175 @@
+import { supabase } from '../../config/supabaseClient.js';
+
+/**
+ * Send a new message
+ * POST /api/app/marketplace/chat/send
+ */
+export const sendMessage = async (req, res) => {
+    try {
+        const { id: sender_id } = req.user;
+        const { family_space_id, listing_id, receiver_id, message } = req.body;
+
+        if (!family_space_id || !listing_id || !receiver_id || !message) {
+            return res.status(400).json({ error: 'family_space_id, listing_id, receiver_id, and message are required' });
+        }
+
+        const { data, error } = await supabase
+            .from('marketplace_messages')
+            .insert([{
+                family_space_id,
+                listing_id,
+                sender_id,
+                receiver_id,
+                message,
+                read_status: false
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(201).json({ message: 'Message sent successfully', data });
+    } catch (err) {
+        console.error('Error sending message:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+/**
+ * Get full chat history between logged in user and another user for a specific listing
+ * GET /api/app/marketplace/chat/history
+ */
+export const getChatHistory = async (req, res) => {
+    try {
+        const { id: current_user_id } = req.user;
+        const { family_space_id, listing_id, other_user_id } = req.query;
+
+        if (!family_space_id || !listing_id || !other_user_id) {
+            return res.status(400).json({ error: 'family_space_id, listing_id, and other_user_id are required' });
+        }
+
+        // Fetch all messages between these two users for this listing
+        const { data: messages, error } = await supabase
+            .from('marketplace_messages')
+            .select('*')
+            .eq('family_space_id', family_space_id)
+            .eq('listing_id', listing_id)
+            .or(`and(sender_id.eq.${current_user_id},receiver_id.eq.${other_user_id}),and(sender_id.eq.${other_user_id},receiver_id.eq.${current_user_id})`)
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+
+        // Mark unread messages sent by the other user as read asynchronously
+        const unreadMessageIds = messages
+            .filter(msg => msg.receiver_id === current_user_id && !msg.read_status)
+            .map(msg => msg.id);
+
+        if (unreadMessageIds.length > 0) {
+            supabase
+                .from('marketplace_messages')
+                .update({ read_status: true })
+                .in('id', unreadMessageIds)
+                .then(({ error }) => {
+                    if (error) console.error('Failed to mark messages as read:', error);
+                });
+        }
+
+        res.status(200).json({ data: messages });
+    } catch (err) {
+        console.error('Error fetching chat history:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+/**
+ * Get inbox list of all recent conversations
+ * GET /api/app/marketplace/chat/conversations
+ */
+export const getConversations = async (req, res) => {
+    try {
+        const { id: current_user_id } = req.user;
+        const { family_space_id } = req.query;
+
+        if (!family_space_id) {
+            return res.status(400).json({ error: 'family_space_id is required' });
+        }
+
+        // Fetch all messages involving the user in this family space
+        const { data: messages, error } = await supabase
+            .from('marketplace_messages')
+            .select(`
+                *,
+                listing:marketplace_listings (id, title, image_urls)
+            `)
+            .eq('family_space_id', family_space_id)
+            .or(`sender_id.eq.${current_user_id},receiver_id.eq.${current_user_id}`)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        // Extract a unique list of other users we are talking to
+        const otherUserIdsSet = new Set();
+        messages.forEach(m => {
+            if (m.sender_id !== current_user_id) otherUserIdsSet.add(m.sender_id);
+            if (m.receiver_id !== current_user_id) otherUserIdsSet.add(m.receiver_id);
+        });
+
+        // Fetch details for all "other users" at once
+        let usersMap = {};
+        if (otherUserIdsSet.size > 0) {
+            const { data: usersData, error: usersError } = await supabase
+                .from('users')
+                .select('id, first_name, last_name, email')
+                .in('id', Array.from(otherUserIdsSet));
+            
+            if (!usersError && usersData) {
+                usersData.forEach(u => {
+                    usersMap[u.id] = u;
+                });
+            }
+        }
+
+        // Group messages by listing_id + other_user_id
+        const conversationsMap = {};
+
+        messages.forEach(msg => {
+            const other_user_id = msg.sender_id === current_user_id ? msg.receiver_id : msg.sender_id;
+            const convoKey = `${msg.listing_id}_${other_user_id}`;
+
+            if (!conversationsMap[convoKey]) {
+                const otherUser = usersMap[other_user_id] || { id: other_user_id, first_name: 'Unknown', last_name: 'User' };
+                const listing = msg.listing || { id: msg.listing_id, title: 'Unknown Listing', image_urls: [] };
+                
+                conversationsMap[convoKey] = {
+                    other_user: {
+                        id: otherUser.id,
+                        name: `${otherUser.first_name} ${otherUser.last_name}`,
+                        email: otherUser.email
+                    },
+                    listing: {
+                        id: listing.id,
+                        title: listing.title,
+                        thumbnail: listing.image_urls && listing.image_urls.length > 0 ? listing.image_urls[0] : null
+                    },
+                    latest_message: msg.message,
+                    latest_timestamp: msg.created_at,
+                    unread_count: 0
+                };
+            }
+
+            // Increment unread count if the current user is the receiver and message is unread
+            if (msg.receiver_id === current_user_id && !msg.read_status) {
+                conversationsMap[convoKey].unread_count += 1;
+            }
+        });
+
+        const conversationsList = Object.values(conversationsMap).sort((a, b) => {
+            return new Date(b.latest_timestamp) - new Date(a.latest_timestamp);
+        });
+
+        res.status(200).json({ data: conversationsList });
+    } catch (err) {
+        console.error('Error fetching conversations:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};

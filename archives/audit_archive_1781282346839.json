@@ -1,0 +1,158 @@
+[
+  {
+    "id": "2af0b0e7-fccd-4b10-845a-39b8941163c0",
+    "actor_id": "a0ca8513-97df-46d2-b9d7-3db453288898",
+    "action": "FAMILY_ROLE_SETTINGS_UPDATE",
+    "target_type": "family_spaces",
+    "target_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+    "details": {
+      "visibility": "All family members",
+      "hideSubBranches": false,
+      "allowLineageMerge": true
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T06:28:35.537478+00:00"
+  },
+  {
+    "id": "78233433-444e-4194-830e-acdb77ae01ed",
+    "actor_id": "a0ca8513-97df-46d2-b9d7-3db453288898",
+    "action": "FAMILY_ROLE_SETTINGS_UPDATE",
+    "target_type": "family_spaces",
+    "target_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+    "details": {
+      "visibility": "All family members",
+      "hideSubBranches": false,
+      "allowLineageMerge": true
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T06:30:36.627421+00:00"
+  },
+  {
+    "id": "5d587914-6b56-4b6a-bdd1-09ab689c4390",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_REPORT_REQUEST",
+    "target_type": "family_reports",
+    "target_id": "2ac272a9-a46c-4c4d-aed3-3a76886c5b1e",
+    "details": {
+      "config": {
+        "depth": 5,
+        "scope": "entire_tree"
+      },
+      "report_type": "album_& book builder"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:10:04.841426+00:00"
+  },
+  {
+    "id": "fb1bf2f2-02e3-42c1-ba2f-9edead428b63",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_REPORT_REQUEST",
+    "target_type": "family_reports",
+    "target_id": "315f1bdc-db3a-456d-be76-5872d7abeba7",
+    "details": {
+      "config": {
+        "depth": 5,
+        "scope": "entire_tree"
+      },
+      "report_type": "descendant_report"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:11:41.012866+00:00"
+  },
+  {
+    "id": "ae13f335-754b-4491-88ce-99bb14803dad",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_REPORT_REQUEST",
+    "target_type": "family_reports",
+    "target_id": "639e83e0-8618-4f33-af3f-4c84d0e97b32",
+    "details": {
+      "config": {
+        "depth": 5,
+        "scope": "entire_tree"
+      },
+      "report_type": "branch_growth report"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:13:02.222458+00:00"
+  },
+  {
+    "id": "7310769d-b0d9-4d46-a6a5-114aa756f955",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_SETTINGS_UPDATE",
+    "target_type": "family_spaces",
+    "target_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+    "details": {
+      "name": "The Kincore Family",
+      "description": "Our family space , edited",
+      "notifications": {
+        "events": true,
+        "registry": true,
+        "governance": true
+      },
+      "origin_location": "Chicagoo",
+      "default_visibility": "Branch Only",
+      "registration_rules": "All Members"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:14:20.479869+00:00"
+  },
+  {
+    "id": "f7209480-cb52-48be-aa75-919c3290429e",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_REPORT_REQUEST",
+    "target_type": "family_reports",
+    "target_id": "3115c63e-76dd-4381-b5cd-1890a16d489c",
+    "details": {
+      "config": {
+        "depth": 5,
+        "scope": "entire_tree"
+      },
+      "report_type": "branch_growth report"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:14:43.89014+00:00"
+  },
+  {
+    "id": "18c4346b-b630-4b5b-aa54-f91275244d99",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_SETTINGS_UPDATE",
+    "target_type": "family_spaces",
+    "target_id": "d8adb0c1-feae-4384-98d0-9d8b1660869f",
+    "details": {
+      "name": "The Family ",
+      "description": "family space edited",
+      "notifications": {
+        "events": true,
+        "registry": true,
+        "governance": false
+      },
+      "origin_location": "Chicago",
+      "default_visibility": "Family Only",
+      "registration_rules": "Verified Only"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:21:57.889256+00:00"
+  },
+  {
+    "id": "3b08ca7e-3070-42ca-910c-56495dfcc21c",
+    "actor_id": "0e95570a-532c-49ae-9cde-0335cc2df13a",
+    "action": "FAMILY_SETTINGS_UPDATE",
+    "target_type": "family_spaces",
+    "target_id": "d8adb0c1-feae-4384-98d0-9d8b1660869f",
+    "details": {
+      "name": "The Family ",
+      "logo_url": "https://fpzuqnpoksaeacedirns.supabase.co/storage/v1/object/public/avatars/d8adb0c1-feae-4384-98d0-9d8b1660869f/logo_1778675042693_20260317_1206_Image%20Generation_simple_compose_01kkx83rxjfgbsma1v87gtaek9.png",
+      "description": "family space edited",
+      "notifications": {
+        "events": true,
+        "registry": true,
+        "governance": false
+      },
+      "origin_location": "Chicago",
+      "default_visibility": "Family Only",
+      "registration_rules": "Verified Only"
+    },
+    "ip_address": "::1",
+    "created_at": "2026-05-13T12:24:12.79834+00:00"
+  }
+]

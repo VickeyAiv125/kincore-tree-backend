@@ -1,0 +1,184 @@
+{
+  "assigned_families": [
+    {
+      "id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "name": "The Kincore Family",
+      "assigned_at": "2026-01-15T08:00:00Z",
+      "status": "active"
+    },
+    {
+      "id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "name": "Business family",
+      "assigned_at": "2026-02-10T10:00:00Z",
+      "status": "active"
+    },
+    {
+      "id": "d8adb0c1-feae-4384-98d0-9d8b1660869f",
+      "name": "The Family",
+      "assigned_at": "2026-03-01T12:00:00Z",
+      "status": "active"
+    }
+  ],
+  "governance_cases": [
+    {
+      "id": "gov_001",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "title": "Amend Family Tree Privacy Policy",
+      "description": "Proposal to restrict access of lineage node updates to core members only.",
+      "proposed_by": "John Doe",
+      "status": "voting",
+      "stage": "Voting Phase",
+      "votes_for": 15,
+      "votes_against": 3,
+      "threshold": 75,
+      "ends_at": "2026-06-05T18:00:00Z"
+    },
+    {
+      "id": "gov_002",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "title": "Approve Local Historian Role",
+      "description": "Proposal to grant administrative historical permissions to Elder Sarah.",
+      "proposed_by": "Sarah Bennett",
+      "status": "draft",
+      "stage": "Drafting",
+      "votes_for": 0,
+      "votes_against": 0,
+      "threshold": 50,
+      "ends_at": "2026-06-15T12:00:00Z"
+    },
+    {
+      "id": "gov_003",
+      "family_space_id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "title": "Establish Trust Fund Integration",
+      "description": "Establish rules for automatic allocation of family credits for education purposes.",
+      "proposed_by": "Robert Admin",
+      "status": "resolved",
+      "stage": "Resolved (Approved)",
+      "votes_for": 22,
+      "votes_against": 1,
+      "threshold": 66,
+      "ends_at": "2026-05-20T10:00:00Z"
+    }
+  ],
+  "disputes": [
+    {
+      "id": "disp_001",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "person_id": "p_001",
+      "person_name": "Arthur Bennett (1902-1982)",
+      "claimed_by_1": {
+        "id": "u_001",
+        "name": "James Bennett",
+        "email": "james@example.com"
+      },
+      "claimed_by_2": {
+        "id": "u_002",
+        "name": "Thomas Bennett",
+        "email": "thomas@example.com"
+      },
+      "reason_1": "Direct grandson through the elder branch, has grandfather's birth certificate.",
+      "reason_2": "Cousin through second marriage, holds family Bible register.",
+      "status": "pending",
+      "created_at": "2026-05-25T14:22:00Z"
+    },
+    {
+      "id": "disp_002",
+      "family_space_id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "person_id": "p_002",
+      "person_name": "Eleanor Vance (1922-2001)",
+      "claimed_by_1": {
+        "id": "u_003",
+        "name": "Mary Vance",
+        "email": "mary@example.com"
+      },
+      "claimed_by_2": {
+        "id": "u_004",
+        "name": "Jane Vance",
+        "email": "jane@example.com"
+      },
+      "reason_1": "Only surviving daughter, verified via obituary.",
+      "reason_2": "Adopted daughter claiming priority representation.",
+      "status": "resolved",
+      "resolved_notes": "Assigned primary node ownership to Mary Vance; granted co-editor rights to Jane Vance.",
+      "created_at": "2026-05-10T09:15:00Z"
+    }
+  ],
+  "lineage_claims": [
+    {
+      "id": "claim_001",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "person_name": "Charles Bennett",
+      "requested_by": "James Bennett",
+      "relationship": "Grandfather",
+      "evidence_url": "https://example.com/certificates/birth_charles_b.pdf",
+      "status": "pending",
+      "created_at": "2026-05-27T11:00:00Z"
+    },
+    {
+      "id": "claim_002",
+      "family_space_id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "person_name": "David Vance",
+      "requested_by": "Mary Vance",
+      "relationship": "Father",
+      "evidence_url": "https://example.com/certificates/death_david_v.pdf",
+      "status": "pending",
+      "created_at": "2026-05-26T15:30:00Z"
+    }
+  ],
+  "sensitive_changes": [
+    {
+      "id": "sens_001",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "requested_by": "Admin Alice",
+      "change_type": "Security settings modification",
+      "details": "Disable multi-factor authentication requirements for family members.",
+      "status": "pending",
+      "created_at": "2026-05-28T09:00:00Z"
+    },
+    {
+      "id": "sens_002",
+      "family_space_id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "requested_by": "Robert Admin",
+      "change_type": "Permissions escalation",
+      "details": "Change public branch editing permissions to 'Allow all guests'.",
+      "status": "pending",
+      "created_at": "2026-05-27T14:20:00Z"
+    }
+  ],
+  "family_merge_requests": [
+    {
+      "id": "merge_001",
+      "source_space_id": "d8adb0c1-feae-4384-98d0-9d8b1660869f",
+      "source_space_name": "The Family",
+      "target_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "target_space_name": "The Kincore Family",
+      "requested_by": "William Bennett",
+      "status": "pending",
+      "created_at": "2026-05-24T10:11:00Z"
+    }
+  ],
+  "voting_configurations": [
+    {
+      "id": "vote_cfg_001",
+      "family_space_id": "d8eefc0a-6497-4bf5-8077-f2b35a3ed5cd",
+      "majority_rule": "consensus",
+      "threshold_percentage": 100,
+      "min_quorum": 5,
+      "updated_at": "2026-05-28T16:00:00Z"
+    },
+    {
+      "id": "vote_cfg_002",
+      "family_space_id": "687ffa37-7773-485f-99b3-3dc6833a5199",
+      "majority_rule": "majority",
+      "threshold_percentage": 50,
+      "min_quorum": 3,
+      "updated_at": "2026-05-26T12:00:00Z"
+    }
+  ],
+  "billing_config": {
+    "marketplace_rate_percent": 15,
+    "ad_revenue_manual": 250,
+    "currency": "USD",
+    "updated_at": "2026-07-14T12:25:12.725Z"
+  }
+}
