@@ -8,13 +8,21 @@ import { uploadFile, BUCKETS } from '../../config/storageClient.js';
 export const getListings = async (req, res) => {
     try {
         const { search, category, condition, family_space_id } = req.query;
+        const userId = req.user?.id;
 
         let query = supabase
             .from('marketplace_listings')
             .select('*, seller:users!marketplace_listings_seller_id_fkey(first_name, last_name, avatar_url)')
-            .eq('status', 'active')
-            .eq('moderation_status', 'approved')
+            .neq('status', 'deleted')
             .order('created_at', { ascending: false });
+
+        if (userId) {
+            query = query.or(
+                `and(status.eq.active,moderation_status.eq.approved),seller_id.eq.${userId}`
+            );
+        } else {
+            query = query.eq('status', 'active').eq('moderation_status', 'approved');
+        }
 
         // If family context, filter by family space
         if (family_space_id) {
@@ -52,6 +60,7 @@ export const getListings = async (req, res) => {
             seller_name: listing.seller ? `${listing.seller.first_name} ${listing.seller.last_name}` : 'Unknown',
             seller_avatar: listing.seller?.avatar_url || '',
             status: listing.status,
+            moderation_status: listing.moderation_status,
             created_at: listing.created_at,
         }));
 
@@ -123,6 +132,12 @@ export const createListing = async (req, res) => {
             }
         }
 
+        // Family listings wait for family-admin approval.
+        // Listings with no family never reach that queue, so publish them immediately.
+        const needsFamilyApproval = Boolean(family_space_id);
+        const initialStatus = needsFamilyApproval ? 'pending' : 'active';
+        const initialModeration = needsFamilyApproval ? 'pending' : 'approved';
+
         const { data, error } = await supabase
             .from('marketplace_listings')
             .insert({
@@ -136,14 +151,19 @@ export const createListing = async (req, res) => {
                 description,
                 is_negotiable: is_negotiable === 'true' || is_negotiable === true,
                 image_urls,
-                status: 'pending',
-                moderation_status: 'pending',
+                status: initialStatus,
+                moderation_status: initialModeration,
             })
             .select()
             .single();
 
         if (error) throw error;
-        res.status(201).json({ message: "request sent to admin", data });
+        res.status(201).json({
+            message: needsFamilyApproval
+                ? 'request sent to admin'
+                : 'Listing published',
+            data
+        });
     } catch (err) {
         console.error('>>> [MARKETPLACE ERROR]', err);
         
