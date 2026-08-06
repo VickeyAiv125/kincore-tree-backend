@@ -1,0 +1,55 @@
+name: Deploy UAT API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: uat-api
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.UAT_SSH_KEY }}" > ~/.ssh/uat_key
+          chmod 600 ~/.ssh/uat_key
+          ssh-keyscan -p "${{ secrets.UAT_SSH_PORT || 22 }}" -H "${{ secrets.UAT_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync API code (keep server .env)
+        env:
+          HOST: ${{ secrets.UAT_HOST }}
+          USER: ${{ secrets.UAT_USER }}
+          PORT: ${{ secrets.UAT_SSH_PORT || 22 }}
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/uat_key -p ${PORT} -o IdentitiesOnly=yes" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'node_modules/' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'uploads/' \
+            --exclude 'coverage/' \
+            ./ "${USER}@${HOST}:/opt/kincore/backend/"
+
+      - name: Install deps & restart PM2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.UAT_HOST }}
+          username: ${{ secrets.UAT_USER }}
+          key: ${{ secrets.UAT_SSH_KEY }}
+          port: ${{ secrets.UAT_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd /opt/kincore/backend
+            npm ci --omit=dev
+            pm2 restart kincore-api --update-env || pm2 start index.js --name kincore-api
+            pm2 save
+            curl -fsS http://127.0.0.1:5000/health || curl -fsS http://127.0.0.1:3000/health || true
