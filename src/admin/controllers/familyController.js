@@ -642,7 +642,14 @@ export const joinViaLink = async (req, res) => {
             .eq('user_id', user.id)
             .maybeSingle();
 
-        if (existing) return res.status(409).json({ error: 'You are already a member of this space' });
+        if (existing) {
+            return res.status(409).json({
+                error: 'You are already a member of this space',
+                space_id: space.id,
+                family_space_id: space.id,
+                family_name: space.name,
+            });
+        }
 
         // Add as member
         await supabase.from('family_memberships').insert({
@@ -651,15 +658,59 @@ export const joinViaLink = async (req, res) => {
             role: 'member'
         });
 
-        res.json({ message: `Successfully joined "${space.name}"`, space_id: space.id });
+        res.json({
+            message: `Successfully joined "${space.name}"`,
+            space_id: space.id,
+            family_space_id: space.id,
+            family_name: space.name,
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
 
+const buildInvitePayload = (code, familySpaceId, name = null) => {
+    const inviteCode = String(code || '').toUpperCase();
+    const webBase = (process.env.LANDING_URL || process.env.FRONTEND_URL || 'https://uat.kincore.com').replace(/\/$/, '');
+    return {
+        invite_code: inviteCode,
+        family_space_id: familySpaceId,
+        family_name: name,
+        invite_url: `${webBase}/join/${inviteCode}`,
+        deep_link: `kincore://join/${inviteCode}`,
+    };
+};
+
 /**
- * Generate an invite code for the space.
+ * Get current invite code + share URLs (does NOT rotate).
+ * GET /api/families/:id/invite
+ */
+export const getInvite = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data, error } = await supabase
+            .from('family_spaces')
+            .select('id, name, code')
+            .eq('id', id)
+            .single();
+
+        if (error) throw error;
+        if (!data?.code) {
+            return res.status(404).json({ error: 'No invite code on this family space yet. Generate one first.' });
+        }
+
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.json(buildInvitePayload(data.code, data.id, data.name));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * Rotate invite code for the space (breaks old QR / links).
+ * POST /api/families/:id/invite
+ * Body optional: { rotate: true } — always rotates on POST for explicit "Generate new code".
  */
 export const inviteMember = async (req, res) => {
     try {
@@ -670,11 +721,15 @@ export const inviteMember = async (req, res) => {
             .from('family_spaces')
             .update({ code: newCode })
             .eq('id', id)
-            .select('code')
+            .select('id, name, code')
             .single();
 
         if (error) throw error;
-        res.json({ invite_code: data.code });
+        res.json({
+            ...buildInvitePayload(data.code, data.id, data.name),
+            rotated: true,
+            message: 'Invite code regenerated. Previous links and QR codes stop working.',
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

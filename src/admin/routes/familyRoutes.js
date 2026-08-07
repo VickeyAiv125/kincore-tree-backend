@@ -6,6 +6,7 @@ import {
     updateFamilySpace,
     getMembers,
     inviteMember,
+    getInvite,
     deleteFamilySpace,
     joinViaLink,
     findYourself,
@@ -97,6 +98,7 @@ router.get('/:id/privacy', authMiddleware, requireFamilyRole('id', ['owner', 'ad
 router.put('/:id/privacy', authMiddleware, requireFamilyRole('id', ['owner', 'admin']), updateFamilyPrivacy);
 router.get('/:id/platform-config', authMiddleware, requireFamilyRole('id', ['owner', 'admin', 'family-admin']), getFamilyPlatformConfig);
 router.put('/:id/platform-config', authMiddleware, requireFamilyRole('id', ['owner', 'admin']), updateFamilyPlatformConfig);
+router.get('/:id/invite', authMiddleware, requireFamilyRole('id', ['owner', 'admin', 'family-admin']), getInvite);
 router.post('/:id/invite', authMiddleware, requireFamilyRole('id', ['owner', 'admin']), inviteMember);
 
 // Custom Labels
