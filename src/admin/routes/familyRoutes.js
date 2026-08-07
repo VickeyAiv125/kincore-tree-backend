@@ -7,6 +7,8 @@ import {
     getMembers,
     inviteMember,
     getInvite,
+    getJoinInfo,
+    joinFamilyPublic,
     deleteFamilySpace,
     joinViaLink,
     findYourself,
@@ -59,6 +61,8 @@ router.post('/', authMiddleware, upload.single('photo'), createFamilySpace);
 router.get('/', authMiddleware, listFamilySpaces);
 
 // Static named routes (before /:id to avoid "find-yourself" being treated as UUID)
+router.get('/join-info', getJoinInfo);
+router.post('/join', joinFamilyPublic);
 router.post('/join-link', authMiddleware, joinViaLink);
 router.get('/find-yourself', authMiddleware, findYourself);
 router.get('/members/single/:id', authMiddleware, getMemberById);

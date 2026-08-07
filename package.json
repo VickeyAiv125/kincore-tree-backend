@@ -8,6 +8,7 @@
     "dev": "nodemon index.js",
     "seed:demo": "node scripts/demo-seed/seed.js",
     "seed:app-requests": "node scripts/demo-seed/seed-app-requests.js",
+    "seed:find-yourself": "node scripts/demo-seed/seed-find-yourself.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -31,6 +32,7 @@
     "pdfkit": "^0.19.1",
     "pg": "^8.21.0",
     "pg-boss": "^10.4.2",
+    "qrcode": "^1.5.4",
     "relationship.js": "^1.2.9"
   },
   "devDependencies": {

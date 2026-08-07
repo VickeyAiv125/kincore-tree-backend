@@ -35,6 +35,8 @@ import {
     LANGUAGE_OPTIONS,
     AUDIT_LEVELS
 } from '../../utils/familyPlatformConfig.js';
+import { AuthService } from '../../services/authService.js';
+import QRCode from 'qrcode';
 
 /**
  * Helper to block suspended spaces.
@@ -600,49 +602,249 @@ export const findYourself = async (req, res) => {
 };
 
 
+const extractInviteCode = (linkOrCode) => {
+    if (!linkOrCode || typeof linkOrCode !== 'string') return '';
+    let code = linkOrCode.trim();
+    try {
+        const url = new URL(code);
+        code = url.searchParams.get('code') || url.pathname.split('/').filter(Boolean).pop() || code;
+    } catch {
+        // raw code
+    }
+    return String(code || '').trim().toUpperCase();
+};
+
+const findSpaceByInviteCode = async (code) => {
+    const { data, error } = await supabase
+        .from('family_spaces')
+        .select('id, name, code, status')
+        .eq('code', code)
+        .maybeSingle();
+    if (error) throw error;
+    return data;
+};
+
+const ensureFamilyMembership = async (spaceId, userId) => {
+    const { data: existing } = await supabase
+        .from('family_memberships')
+        .select('id')
+        .eq('family_space_id', spaceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (existing) return { created: false };
+
+    const { error } = await supabase.from('family_memberships').insert({
+        family_space_id: spaceId,
+        user_id: userId,
+        role: 'member',
+    });
+    if (error) throw error;
+    return { created: true };
+};
+
+const buildInvitePayload = async (code, familySpaceId, name = null) => {
+    const inviteCode = String(code || '').toUpperCase();
+    const webBase = (
+        process.env.LANDING_URL
+        || process.env.INVITE_WEB_BASE_URL
+        || 'https://uat.kincore.com'
+    ).replace(/\/$/, '');
+    const inviteUrl = `${webBase}/join/${inviteCode}`;
+    const deepLink = `kincore://join/${inviteCode}`;
+
+    let qr_code_data_url = null;
+    try {
+        qr_code_data_url = await QRCode.toDataURL(inviteUrl, {
+            errorCorrectionLevel: 'M',
+            margin: 1,
+            width: 512,
+        });
+    } catch (err) {
+        console.warn('[invite QR]', err.message);
+    }
+
+    return {
+        invite_code: inviteCode,
+        family_space_id: familySpaceId,
+        family_name: name,
+        invite_url: inviteUrl,
+        deep_link: deepLink,
+        qr_code_data_url,
+    };
+};
+
 /**
- * Join a family space via an invitation LINK (URL).
- * Screen: "Join via Link" — user pastes full URL like:
- * https://kincore.app/join/FAM-ABC123
- * or just the code: FAM-ABC123
+ * Public preview for an invite code (no auth). Used by mobile/landing before join form.
+ * GET /api/families/join-info?code=DEMO-CHEN
+ */
+export const getJoinInfo = async (req, res) => {
+    try {
+        const code = extractInviteCode(req.query.code || req.query.link || '');
+        if (!code) return res.status(400).json({ error: 'Invite code is required' });
+
+        const space = await findSpaceByInviteCode(code);
+        if (!space || space.status === 'deleted') {
+            return res.status(404).json({ error: 'Invalid or expired invitation link' });
+        }
+        if (space.status === 'suspended') {
+            return res.status(403).json({ error: 'This family space is suspended' });
+        }
+
+        const payload = await buildInvitePayload(space.code, space.id, space.name);
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.json(payload);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * Public join — no prior login required.
+ * Creates account (or signs in existing) with the submitted details, then joins the space.
+ * POST /api/families/join
+ * Body: { link|code, first_name, last_name, email, password, gender?, phone?, date_of_birth? }
+ */
+export const joinFamilyPublic = async (req, res) => {
+    try {
+        const {
+            link,
+            code,
+            first_name,
+            last_name,
+            email,
+            password,
+            gender,
+            phone,
+            date_of_birth,
+        } = req.body || {};
+
+        const inviteCode = extractInviteCode(link || code || '');
+        if (!inviteCode) {
+            return res.status(400).json({ error: 'Invitation link or code is required' });
+        }
+        if (!email || !password) {
+            return res.status(400).json({ error: 'email and password are required to join' });
+        }
+        if (!first_name || !last_name) {
+            return res.status(400).json({ error: 'first_name and last_name are required' });
+        }
+
+        const space = await findSpaceByInviteCode(inviteCode);
+        if (!space || space.status === 'deleted') {
+            return res.status(404).json({ error: 'Invalid or expired invitation link' });
+        }
+        if (space.status === 'suspended') {
+            return res.status(403).json({ error: 'This family space is suspended' });
+        }
+
+        const cleanEmail = String(email).trim().toLowerCase();
+        let isNewUser = false;
+
+        try {
+            await AuthService.signup({
+                email: cleanEmail,
+                password,
+                first_name,
+                last_name,
+                date_of_birth: date_of_birth || null,
+            });
+            isNewUser = true;
+        } catch (signupErr) {
+            const msg = String(signupErr.message || '').toLowerCase();
+            const already =
+                msg.includes('already') ||
+                msg.includes('registered') ||
+                msg.includes('exists') ||
+                msg.includes('user already');
+            if (!already) {
+                return res.status(400).json({ error: signupErr.message });
+            }
+            // Existing account — continue with login using provided password
+        }
+
+        if (isNewUser) {
+            const profilePatch = {};
+            if (gender) profilePatch.gender = String(gender).toLowerCase();
+            if (phone) profilePatch.phone = String(phone);
+            if (Object.keys(profilePatch).length) {
+                await supabase.from('users').update(profilePatch).eq('email', cleanEmail);
+            }
+        }
+
+        let authResult;
+        try {
+            authResult = await AuthService.login({ email: cleanEmail, password });
+        } catch (loginErr) {
+            return res.status(401).json({
+                error: isNewUser
+                    ? loginErr.message
+                    : 'An account with this email already exists. Enter the correct password to join, or use a different email.',
+            });
+        }
+
+        const userId = authResult.user?.id;
+        if (!userId) {
+            return res.status(500).json({ error: 'Join succeeded but session user id is missing' });
+        }
+
+        if (!isNewUser) {
+            const profilePatch = { updated_at: new Date().toISOString() };
+            if (first_name) profilePatch.first_name = first_name;
+            if (last_name) profilePatch.last_name = last_name;
+            if (gender) profilePatch.gender = String(gender).toLowerCase();
+            if (phone) profilePatch.phone = String(phone);
+            if (date_of_birth) profilePatch.date_of_birth = date_of_birth;
+            await supabase.from('users').update(profilePatch).eq('id', userId);
+        }
+
+        const membership = await ensureFamilyMembership(space.id, userId);
+
+        res.status(isNewUser || membership.created ? 201 : 200).json({
+            message: membership.created
+                ? `Successfully joined "${space.name}"`
+                : `You are already a member of "${space.name}"`,
+            already_member: !membership.created,
+            is_new_user: isNewUser,
+            space_id: space.id,
+            family_space_id: space.id,
+            family_name: space.name,
+            invite_code: space.code,
+            token: authResult.token,
+            user: {
+                ...authResult.user,
+                family_id: space.id,
+                family_name: space.name,
+            },
+        });
+    } catch (err) {
+        console.error('[joinFamilyPublic]', err);
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * Join a family space via invitation LINK while already authenticated.
+ * POST /api/families/join-link  { link }
  */
 export const joinViaLink = async (req, res) => {
     try {
-        const { link } = req.body;
+        const { link, code } = req.body || {};
         const { user } = req;
 
-        if (!link) return res.status(400).json({ error: 'Invitation link is required' });
+        const inviteCode = extractInviteCode(link || code || '');
+        if (!inviteCode) return res.status(400).json({ error: 'Invitation link is required' });
 
-        // Extract code from URL or use as-is if it's just a code
-        let code = link.trim();
-        try {
-            const url = new URL(link);
-            // Support: /join/FAM-ABC123 or ?code=FAM-ABC123
-            const pathParts = url.pathname.split('/');
-            code = pathParts[pathParts.length - 1] || url.searchParams.get('code') || code;
-        } catch {
-            // Not a URL — treat raw input as the code directly
+        const space = await findSpaceByInviteCode(inviteCode);
+        if (!space || space.status === 'deleted') {
+            return res.status(404).json({ error: 'Invalid or expired invitation link' });
+        }
+        if (space.status === 'suspended') {
+            return res.status(403).json({ error: 'This family space is suspended' });
         }
 
-        // Find the space by code
-        const { data: space, error: spaceError } = await supabase
-            .from('family_spaces')
-            .select('id, name')
-            .eq('code', code.toUpperCase())
-            .maybeSingle();
-
-        if (spaceError) throw spaceError;
-        if (!space) return res.status(404).json({ error: 'Invalid or expired invitation link' });
-
-        // Check if already a member
-        const { data: existing } = await supabase
-            .from('family_memberships')
-            .select('id')
-            .eq('family_space_id', space.id)
-            .eq('user_id', user.id)
-            .maybeSingle();
-
-        if (existing) {
+        const membership = await ensureFamilyMembership(space.id, user.id);
+        if (!membership.created) {
             return res.status(409).json({
                 error: 'You are already a member of this space',
                 space_id: space.id,
@@ -650,13 +852,6 @@ export const joinViaLink = async (req, res) => {
                 family_name: space.name,
             });
         }
-
-        // Add as member
-        await supabase.from('family_memberships').insert({
-            family_space_id: space.id,
-            user_id: user.id,
-            role: 'member'
-        });
 
         res.json({
             message: `Successfully joined "${space.name}"`,
@@ -669,25 +864,8 @@ export const joinViaLink = async (req, res) => {
     }
 };
 
-
-const buildInvitePayload = (code, familySpaceId, name = null) => {
-    const inviteCode = String(code || '').toUpperCase();
-    const webBase = (
-        process.env.LANDING_URL
-        || process.env.INVITE_WEB_BASE_URL
-        || 'https://uat.kincore.com'
-    ).replace(/\/$/, '');
-    return {
-        invite_code: inviteCode,
-        family_space_id: familySpaceId,
-        family_name: name,
-        invite_url: `${webBase}/join/${inviteCode}`,
-        deep_link: `kincore://join/${inviteCode}`,
-    };
-};
-
 /**
- * Get current invite code + share URLs (does NOT rotate).
+ * Get current invite code + share URLs + QR (does NOT rotate).
  * GET /api/families/:id/invite
  */
 export const getInvite = async (req, res) => {
@@ -705,7 +883,7 @@ export const getInvite = async (req, res) => {
         }
 
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        res.json(buildInvitePayload(data.code, data.id, data.name));
+        res.json(await buildInvitePayload(data.code, data.id, data.name));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -714,7 +892,6 @@ export const getInvite = async (req, res) => {
 /**
  * Rotate invite code for the space (breaks old QR / links).
  * POST /api/families/:id/invite
- * Body optional: { rotate: true } — always rotates on POST for explicit "Generate new code".
  */
 export const inviteMember = async (req, res) => {
     try {
@@ -730,7 +907,7 @@ export const inviteMember = async (req, res) => {
 
         if (error) throw error;
         res.json({
-            ...buildInvitePayload(data.code, data.id, data.name),
+            ...(await buildInvitePayload(data.code, data.id, data.name)),
             rotated: true,
             message: 'Invite code regenerated. Previous links and QR codes stop working.',
         });

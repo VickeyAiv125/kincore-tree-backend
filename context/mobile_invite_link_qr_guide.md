@@ -1,92 +1,76 @@
-# Mobile: Family invite link & QR
+# Mobile: Family invite link & QR (API-focused)
 
-UAT API: `https://uat.api.kincore.com`  
-Share base: `https://uat.kincore.com/join/{CODE}`  
-Deep link: `kincore://join/{CODE}`
+Base URL: `https://uat.api.kincore.com`
 
-## APIs
+## Admin — share invite + QR
 
-| Action | Method | Path |
-|--------|--------|------|
-| Get current code (do **not** rotate) | GET | `/api/families/:id/invite` |
-| Generate new code (invalidates old QR) | POST | `/api/families/:id/invite` |
-| Join | POST | `/api/families/join-link` body `{ "link": "<url or code>" }` |
-| Tree after join | GET | `/api/tree/data?family_space_id=...` |
+**GET** `/api/families/{family_space_id}/invite`  
+Auth: Bearer token (owner/admin)
 
-### GET invite response
+Returns:
 
 ```json
 {
-  "invite_code": "FAM-XXXX",
-  "family_space_id": "…",
-  "family_name": "…",
-  "invite_url": "https://uat.kincore.com/join/FAM-XXXX",
-  "deep_link": "kincore://join/FAM-XXXX"
+  "invite_code": "DEMO-CHEN",
+  "invite_url": "https://uat.kincore.com/join/DEMO-CHEN",
+  "deep_link": "kincore://join/DEMO-CHEN",
+  "qr_code_data_url": "data:image/png;base64,..."
 }
 ```
 
-### Join response
+- Show `qr_code_data_url` in an `<Image>` / Flutter `Image.memory` after decoding base64  
+- Or generate QR client-side from `invite_url`  
+- **POST** same path only when regenerating code (invalidates old QR)
 
-- `200` → `{ message, space_id }`
-- `409` → already a member
-- `404` → invalid code
+## Public — preview invite (no login)
 
-## Flutter packages
+**GET** `/api/families/join-info?code=DEMO-CHEN`
 
-```yaml
-dependencies:
-  qr_flutter: ^4.1.0
-  share_plus: ^10.0.0
-  app_links: ^6.3.0
-  # plus your existing http / dio / go_router
+Same shape as above (includes QR). Use on join screen before the form.
+
+## Public — join without prior login
+
+**POST** `/api/families/join`  
+**No Authorization header**
+
+```json
+{
+  "link": "DEMO-CHEN",
+  "first_name": "Riya",
+  "last_name": "Sharma",
+  "email": "riya@example.com",
+  "password": "Secret@123",
+  "gender": "female"
+}
 ```
 
-## Copy these files into the app
+`link` may be full URL or raw code. Optional: `phone`, `date_of_birth`.
 
-Reference implementations live under [`mobile/invite/`](../../mobile/invite/) in the monorepo (or copy from this guide’s sibling folder):
+Creates account if new, or signs in if email already exists (password must match), then adds family membership.
 
-- `invite_api.dart` — API client
-- `invite_share_screen.dart` — admin share + QR
-- `join_link_screen.dart` — paste code / deep-link landing
-- `invite_deep_link.dart` — app_links wiring
+Response `201`/`200`:
 
-## Deep link setup
-
-### Android `AndroidManifest.xml`
-
-```xml
-<!-- Custom scheme -->
-<intent-filter>
-  <action android:name="android.intent.action.VIEW" />
-  <category android:name="android.intent.category.DEFAULT" />
-  <category android:name="android.intent.category.BROWSABLE" />
-  <data android:scheme="kincore" android:host="join" />
-</intent-filter>
-
-<!-- HTTPS App Links (optional; verify assetlinks later) -->
-<intent-filter android:autoVerify="true">
-  <action android:name="android.intent.action.VIEW" />
-  <category android:name="android.intent.category.DEFAULT" />
-  <category android:name="android.intent.category.BROWSABLE" />
-  <data android:scheme="https" android:host="uat.kincore.com" android:pathPrefix="/join" />
-</intent-filter>
+```json
+{
+  "message": "Successfully joined \"…\"",
+  "token": "<use as Bearer for later calls>",
+  "space_id": "…",
+  "family_space_id": "…",
+  "family_name": "…",
+  "is_new_user": true,
+  "already_member": false,
+  "user": { }
+}
 ```
 
-### iOS `Info.plist`
+Then load tree: **GET** `/api/tree/data?family_space_id={space_id}` with the returned `token`.
 
-```xml
-<key>CFBundleURLTypes</key>
-<array>
-  <dict>
-    <key>CFBundleURLSchemes</key>
-    <array><string>kincore</string></array>
-  </dict>
-</array>
-```
+## Optional — already logged-in join
 
-## Flow rules
+**POST** `/api/families/join-link`  
+Auth required  
+`{ "link": "DEMO-CHEN" }`
 
-1. Invite screen uses **GET** `/invite` for display + QR (never rotate on open).
-2. Only “Generate new code” calls **POST** `/invite`.
-3. On deep link: if logged out, stash code → login → call `join-link`.
-4. After join, open `GET /api/tree/data?family_space_id={space_id}`.
+## Landing
+
+https://uat.kincore.com/join/{CODE} — form posts to public `/api/families/join`.
