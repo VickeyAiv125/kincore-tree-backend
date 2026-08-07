@@ -672,7 +672,11 @@ export const joinViaLink = async (req, res) => {
 
 const buildInvitePayload = (code, familySpaceId, name = null) => {
     const inviteCode = String(code || '').toUpperCase();
-    const webBase = (process.env.LANDING_URL || process.env.FRONTEND_URL || 'https://uat.kincore.com').replace(/\/$/, '');
+    const webBase = (
+        process.env.LANDING_URL
+        || process.env.INVITE_WEB_BASE_URL
+        || 'https://uat.kincore.com'
+    ).replace(/\/$/, '');
     return {
         invite_code: inviteCode,
         family_space_id: familySpaceId,
