@@ -302,13 +302,62 @@ export const AuthService = {
         };
     },
 
-    async oauthLogin({ email, access_token, provider, client_type, allow_signup }) {
+    async oauthLogin({ email, access_token, id_token, provider, client_type, allow_signup }) {
         let userId = null;
         let cleanEmail = null;
         let userObj = null;
+        let sessionAccessToken = access_token || null;
 
-        if (access_token) {
-            const { data: { user: authUser }, error } = await supabase.auth.getUser(access_token);
+        // Native mobile Google: exchange Google ID token → Supabase session
+        if (!sessionAccessToken && id_token && String(provider || '').toLowerCase() === 'google') {
+            const tokenInfoRes = await fetch(
+                `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(id_token)}`
+            );
+            const tokenInfo = await tokenInfoRes.json();
+            if (!tokenInfoRes.ok) {
+                throw new Error(tokenInfo.error_description || tokenInfo.error || 'Invalid Google ID token');
+            }
+
+            const expectedClientId = String(process.env.GOOGLE_CLIENT_ID || '').trim();
+            if (expectedClientId && tokenInfo.aud && tokenInfo.aud !== expectedClientId) {
+                // Accept Android/iOS client IDs when listed in GOOGLE_OAUTH_CLIENT_IDS
+                const allowed = new Set([
+                    expectedClientId,
+                    ...String(process.env.GOOGLE_OAUTH_CLIENT_IDS || '')
+                        .split(',')
+                        .map((v) => v.trim())
+                        .filter(Boolean),
+                ]);
+                if (!allowed.has(tokenInfo.aud)) {
+                    throw new Error('Google ID token audience is not allowed for this app');
+                }
+            }
+
+            if (!tokenInfo.email) {
+                throw new Error('Google account did not return an email address');
+            }
+            if (tokenInfo.email_verified === 'false' || tokenInfo.email_verified === false) {
+                throw new Error('Google email is not verified. Use a verified Google account.');
+            }
+
+            const { ensureUserFromGoogleProfile, createSessionForEmail } = await import('./googleAuthService.js');
+            const profile = {
+                sub: tokenInfo.sub,
+                email: String(tokenInfo.email).trim().toLowerCase(),
+                emailVerified: true,
+                firstName: tokenInfo.given_name || '',
+                lastName: tokenInfo.family_name || '',
+                fullName: tokenInfo.name || '',
+                avatarUrl: tokenInfo.picture || null,
+                provider: 'google',
+            };
+            await ensureUserFromGoogleProfile(profile);
+            const session = await createSessionForEmail(profile.email);
+            sessionAccessToken = session.access_token;
+        }
+
+        if (sessionAccessToken) {
+            const { data: { user: authUser }, error } = await supabase.auth.getUser(sessionAccessToken);
             if (error || !authUser) throw new Error('Invalid or expired OAuth access token.');
             userId = authUser.id;
             cleanEmail = authUser.email.trim().toLowerCase();
@@ -327,7 +376,7 @@ export const AuthService = {
             }
             if (!userId) throw new Error('No OAuth account found with this email. Please complete signup first.');
         } else {
-            throw new Error('Email or OAuth access_token is required.');
+            throw new Error('Email, OAuth access_token, or Google id_token is required.');
         }
 
         // Check if user already exists in local users table
@@ -434,7 +483,7 @@ export const AuthService = {
         });
 
         return {
-            token: access_token || 'oauth-session',
+            token: sessionAccessToken || access_token || 'oauth-session',
             user: {
                 ...(userRecord || userObj || { id: userId, email: cleanEmail }),
                 role: resolvedRole,

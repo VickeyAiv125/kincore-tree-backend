@@ -59,12 +59,18 @@ export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
     }
 
     const candidate = redirectTo || appDefault;
+
+    // Native app custom scheme (e.g. kincore://auth/callback)
+    if (candidate && /^[a-z][a-z0-9+.-]*:/i.test(candidate) && !/^https?:/i.test(candidate)) {
+        return candidate.replace(/\/$/, '');
+    }
+
     const origin = parseOrigin(candidate);
     if (!origin || !allowed.has(origin)) {
         return appDefault;
     }
 
-    return candidate;
+    return candidate.replace(/\/$/, '');
 };
 
 export const appendOAuthQuery = (baseUrl, params = {}) => {
