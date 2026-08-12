@@ -52,6 +52,8 @@ This section contains literally every consumer-facing endpoint utilized by the R
 * **`GET /api/auth/session`**: Retrieves current authenticated session and permission flags.
 
 ### 1.2 User Profile & Role Discovery
+* **`GET /api/users/me`**: Current user profile for the app header. Includes `level`, `level_title`, `level_label` (e.g. `"Level 4 Historian"`), `life_years` (e.g. `"1920-1995"` or `"1990-Present"`), `birth_year`, `death_year`, `spaces_count`, and `spaces`. Optional `?family_space_id=` (or `x-family-space-id` header) scopes the claimed person used for life years.
+* **`PUT /api/users/me`**: Updates the current user's profile fields.
 * **`GET /api/app/profile/my-role`**: Returns user's highest role hierarchy (`owner`, `admin`, `family-admin`, `member`) and space access for dynamic UI rendering.
 * **`GET /api/users/profile`**: Fetches user's complete personal profile, avatar, phone, and biography.
 * **`PUT /api/users/profile`**: Updates personal profile attributes.

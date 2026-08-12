@@ -23,7 +23,7 @@ export async function seedFamily(byEmail) {
             description: 'Demo family space for Kincore product walkthroughs across all admin and app modules.',
             code: 'CHEN-DEMO',
             status: 'active',
-            visibility: 'family',
+            visibility: 'Listed on marketplace',
             region: 'Asia',
             category: 'clan',
             contact_email: 'owner@admin.com',
@@ -34,7 +34,9 @@ export async function seedFamily(byEmail) {
             settings: {
                 demo: true,
                 tag: DEMO.tag,
-                governance_locked: false
+                governance_locked: false,
+                externalSearchIndexing: true,
+                globalProfileVisibility: true
             },
             updated_at: new Date().toISOString()
         },
