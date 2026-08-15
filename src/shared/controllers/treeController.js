@@ -109,20 +109,6 @@ const personEmailField = (email) => {
     return normalized ? { email: normalized } : {};
 };
 
-async function resolveFamilySpaceIdForUser(family_space_id, userId) {
-    const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(family_space_id);
-    if (isValidUuid) return family_space_id;
-
-    const { data: myMemberships } = await supabase
-        .from('family_memberships')
-        .select('family_space_id, role')
-        .eq('user_id', userId);
-
-    if (!myMemberships?.length) return null;
-    const ownerSpace = myMemberships.find((m) => m.role === 'owner');
-    return ownerSpace ? ownerSpace.family_space_id : myMemberships[0].family_space_id;
-}
-
 /**
  * Add a Parent to a specific target person.
  * Creates a new Person record and a 'parent' relationship edge.
@@ -890,16 +876,23 @@ export const updatePerson = async (req, res) => {
 
 /**
  * GET /tree/webview-url — signed-in mobile app URL for admin family-tree WebView.
+ * Query: family_space_id (required)
  * Returns https://uat-admin.kincore.com/family-tree/webview/{family_space_id}?view=app&token=...
  */
 export const getTreeWebviewUrl = async (req, res) => {
     try {
         const { user } = req;
-        let { family_space_id: familySpaceId } = req.query;
+        const familySpaceId = String(
+            req.query.family_space_id
+            || req.body?.family_space_id
+            || ''
+        ).trim();
 
-        familySpaceId = await resolveFamilySpaceIdForUser(familySpaceId, user.id);
-        if (!familySpaceId) {
-            return res.status(400).json({ error: 'Could not determine family_space_id' });
+        const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(familySpaceId);
+        if (!isValidUuid) {
+            return res.status(400).json({
+                error: 'family_space_id is required and must be a valid UUID'
+            });
         }
 
         const authHeader = String(req.headers.authorization || '');
