@@ -98,6 +98,31 @@ async function getTargetPerson(targetPersonId, familySpaceId) {
     return data;
 }
 
+const normalizePersonEmail = (email) => {
+    if (email == null || email === '') return null;
+    const clean = String(email).trim().toLowerCase();
+    return clean.includes('@') ? clean : null;
+};
+
+const personEmailField = (email) => {
+    const normalized = normalizePersonEmail(email);
+    return normalized ? { email: normalized } : {};
+};
+
+async function resolveFamilySpaceIdForUser(family_space_id, userId) {
+    const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(family_space_id);
+    if (isValidUuid) return family_space_id;
+
+    const { data: myMemberships } = await supabase
+        .from('family_memberships')
+        .select('family_space_id, role')
+        .eq('user_id', userId);
+
+    if (!myMemberships?.length) return null;
+    const ownerSpace = myMemberships.find((m) => m.role === 'owner');
+    return ownerSpace ? ownerSpace.family_space_id : myMemberships[0].family_space_id;
+}
+
 /**
  * Add a Parent to a specific target person.
  * Creates a new Person record and a 'parent' relationship edge.
@@ -109,7 +134,7 @@ export const addParent = async (req, res) => {
             family_space_id, target_person_id,
             first_name, last_name, gender, is_alive,
             date_of_birth, place_of_birth, anniversary_date,
-            current_location, avatar_url, branch_id
+            current_location, avatar_url, branch_id, email
         } = req.body;
         const { user, familyRole } = req;
 
@@ -155,7 +180,8 @@ export const addParent = async (req, res) => {
                 anniversary_date: anniversary_date || null,
                 current_location,
                 avatar_url,
-                branch_id: branch_id || null
+                branch_id: branch_id || null,
+                ...personEmailField(email)
             })
             .select()
             .single();
@@ -202,7 +228,7 @@ export const addChild = async (req, res) => {
             first_name, last_name, gender, is_alive,
             date_of_birth, place_of_birth, anniversary_date,
             current_location, avatar_url,
-            school_college, qualification, study_location, branch_id
+            school_college, qualification, study_location, branch_id, email
         } = req.body;
         const { user, familyRole } = req;
 
@@ -251,7 +277,8 @@ export const addChild = async (req, res) => {
                 school_college,
                 qualification,
                 study_location,
-                branch_id: branch_id || null
+                branch_id: branch_id || null,
+                ...personEmailField(email)
             })
             .select()
             .single();
@@ -296,7 +323,7 @@ export const addFamilyMember = async (req, res) => {
             first_name, last_name, gender, is_alive,
             date_of_birth, anniversary_date, place_of_birth,
             occupation, bio_notes, profile_visibility,
-            hide_sensitive_details, avatar_url, link_existing_id, branch_id
+            hide_sensitive_details, avatar_url, link_existing_id, branch_id, email
         } = req.body;
         const { user, familyRole } = req;
 
@@ -363,7 +390,8 @@ export const addFamilyMember = async (req, res) => {
                     profile_visibility,
                     hide_sensitive_details: hide_sensitive_details === 'true' || hide_sensitive_details === true,
                     avatar_url,
-                    branch_id: branch_id || null
+                    branch_id: branch_id || null,
+                    ...personEmailField(email)
                 })
                 .select()
                 .single();
@@ -855,6 +883,57 @@ export const updatePerson = async (req, res) => {
 
         await logActivity(user.id, 'UPDATE_PERSON', 'persons', person_id, data.family_space_id);
         res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * GET /tree/webview-url — signed-in mobile app URL for admin family-tree WebView.
+ * Returns https://uat-admin.kincore.com/family-tree/webview/{family_space_id}?view=app&token=...
+ */
+export const getTreeWebviewUrl = async (req, res) => {
+    try {
+        const { user } = req;
+        let { family_space_id: familySpaceId } = req.query;
+
+        familySpaceId = await resolveFamilySpaceIdForUser(familySpaceId, user.id);
+        if (!familySpaceId) {
+            return res.status(400).json({ error: 'Could not determine family_space_id' });
+        }
+
+        const authHeader = String(req.headers.authorization || '');
+        const bearerToken = authHeader.startsWith('Bearer ')
+            ? authHeader.slice(7).trim()
+            : String(req.query.token || '').trim();
+
+        if (!bearerToken) {
+            return res.status(401).json({ error: 'Bearer token required' });
+        }
+
+        const { data: membership } = await supabase
+            .from('family_memberships')
+            .select('role')
+            .eq('family_space_id', familySpaceId)
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+        if (!membership) {
+            return res.status(403).json({ error: 'Access denied. You are not a member of this family space.' });
+        }
+
+        const frontendBase = String(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+        const params = new URLSearchParams({
+            view: 'app',
+            token: bearerToken
+        });
+        const url = `${frontendBase}/family-tree/webview/${familySpaceId}?${params.toString()}`;
+
+        res.json({
+            url,
+            family_space_id: familySpaceId,
+            web_app_base: frontendBase
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
