@@ -47,7 +47,10 @@ export const parseOAuthStartQuery = (query = {}) => {
 
 export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
     const webFrontend = trim(process.env.FRONTEND_URL || 'http://localhost:5173');
-    const appDefault = trim(
+    const appDeepLinkDefault = trim(
+        process.env.APP_OAUTH_REDIRECT || 'kincore://auth/callback'
+    );
+    const appWebDefault = trim(
         process.env.APP_URL
         || process.env.MOBILE_WEB_URL
         || 'https://kincore-tree.netlify.app'
@@ -58,7 +61,8 @@ export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
         return `${webFrontend}/auth/callback`;
     }
 
-    const candidate = redirectTo || appDefault;
+    // Prefer explicit redirect_to, then native deep link, then optional web APP_URL.
+    const candidate = redirectTo || appDeepLinkDefault || appWebDefault;
 
     // Native app custom scheme (e.g. kincore://auth/callback)
     if (candidate && /^[a-z][a-z0-9+.-]*:/i.test(candidate) && !/^https?:/i.test(candidate)) {
@@ -67,7 +71,11 @@ export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
 
     const origin = parseOrigin(candidate);
     if (!origin || !allowed.has(origin)) {
-        return appDefault;
+        // Never fall back to a web URL when a deep link default exists.
+        if (appDeepLinkDefault && !/^https?:/i.test(appDeepLinkDefault)) {
+            return appDeepLinkDefault;
+        }
+        return appWebDefault;
     }
 
     return candidate.replace(/\/$/, '');
