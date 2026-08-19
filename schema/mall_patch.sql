@@ -10,6 +10,7 @@ ALTER TABLE public.marketplace_listings ADD COLUMN IF NOT EXISTS updated_at TIME
 ALTER TABLE public.marketplace_messages ADD COLUMN IF NOT EXISTS family_space_id UUID REFERENCES public.family_spaces(id) ON DELETE CASCADE;
 ALTER TABLE public.marketplace_messages ALTER COLUMN family_space_id DROP NOT NULL;
 ALTER TABLE public.marketplace_messages ADD COLUMN IF NOT EXISTS message TEXT;
+ALTER TABLE public.marketplace_messages ADD COLUMN IF NOT EXISTS content TEXT;
 ALTER TABLE public.marketplace_messages ADD COLUMN IF NOT EXISTS read_status BOOLEAN DEFAULT false;
 
 DO $$
@@ -19,6 +20,7 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'marketplace_messages' AND column_name = 'content'
     ) THEN
         UPDATE public.marketplace_messages SET message = content WHERE message IS NULL AND content IS NOT NULL;
+        UPDATE public.marketplace_messages SET content = message WHERE content IS NULL AND message IS NOT NULL;
     END IF;
 END $$;
 

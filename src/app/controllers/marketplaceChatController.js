@@ -1,16 +1,45 @@
 import { supabase } from '../../config/supabaseClient.js';
 
+const missingMessageColumn = (error) => {
+    const match = String(error?.message || '').match(/Could not find the '([^']+)' column of 'marketplace_messages'/i);
+    return match ? match[1] : null;
+};
+
+const insertMarketplaceMessage = async (row) => {
+    let payload = { ...row };
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const { data, error } = await supabase
+            .from('marketplace_messages')
+            .insert([payload])
+            .select()
+            .single();
+        if (!error) return data;
+        const missing = missingMessageColumn(error);
+        if (!missing) throw error;
+        delete payload[missing];
+        console.warn(`marketplace_messages is missing column ${missing}; retrying insert without it`);
+    }
+    throw new Error('Could not send message: marketplace_messages schema mismatch');
+};
+
+const normalizeMessage = (row) => {
+    if (!row) return row;
+    const text = row.message || row.content || '';
+    return { ...row, message: text, content: text };
+};
+
 /**
  * Send a new message
- * POST /api/app/marketplace/chat/send
+ * POST /api/marketplace/chat/send
  */
 export const sendMessage = async (req, res) => {
     try {
         const { id: sender_id } = req.user;
-        const { listing_id, receiver_id, message } = req.body;
+        const { listing_id, receiver_id } = req.body;
+        const text = String(req.body.message ?? req.body.content ?? req.body.text ?? '').trim();
         let { family_space_id } = req.body;
 
-        if (!listing_id || !receiver_id || !message) {
+        if (!listing_id || !receiver_id || !text) {
             return res.status(400).json({ error: 'listing_id, receiver_id, and message are required' });
         }
 
@@ -23,22 +52,18 @@ export const sendMessage = async (req, res) => {
             family_space_id = listing?.family_space_id || null;
         }
 
-        const { data, error } = await supabase
-            .from('marketplace_messages')
-            .insert([{
-                family_space_id: family_space_id || null,
-                listing_id,
-                sender_id,
-                receiver_id,
-                message,
-                read_status: false
-            }])
-            .select()
-            .single();
+        // Live UAT has NOT NULL `content`; newer schema uses `message`. Write both.
+        const data = await insertMarketplaceMessage({
+            family_space_id: family_space_id || null,
+            listing_id,
+            sender_id,
+            receiver_id,
+            message: text,
+            content: text,
+            read_status: false
+        });
 
-        if (error) throw error;
-
-        res.status(201).json({ message: 'Message sent successfully', data });
+        res.status(201).json({ message: 'Message sent successfully', data: normalizeMessage(data) });
     } catch (err) {
         console.error('Error sending message:', err);
         res.status(500).json({ error: err.message || 'Server error' });
@@ -72,9 +97,10 @@ export const getChatHistory = async (req, res) => {
 
         const { data: messages, error } = await query;
         if (error) throw error;
+        const normalized = (messages || []).map(normalizeMessage);
 
         // Mark unread messages sent by the other user as read asynchronously
-        const unreadMessageIds = messages
+        const unreadMessageIds = normalized
             .filter(msg => msg.receiver_id === current_user_id && !msg.read_status)
             .map(msg => msg.id);
 
@@ -88,7 +114,7 @@ export const getChatHistory = async (req, res) => {
                 });
         }
 
-        res.status(200).json({ data: messages });
+        res.status(200).json({ data: normalized });
     } catch (err) {
         console.error('Error fetching chat history:', err);
         res.status(500).json({ error: err.message || 'Server error' });
