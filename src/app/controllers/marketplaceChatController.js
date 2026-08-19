@@ -1,25 +1,50 @@
 import { supabase } from '../../config/supabaseClient.js';
 
+const pickText = (...vals) => {
+    for (const value of vals) {
+        if (value == null) continue;
+        if (typeof value === 'object') {
+            const nested = pickText(value.text, value.message, value.content, value.body);
+            if (nested) return nested;
+            continue;
+        }
+        const text = String(value).trim();
+        if (text) return text;
+    }
+    return '';
+};
+
 const missingMessageColumn = (error) => {
     const match = String(error?.message || '').match(/Could not find the '([^']+)' column of 'marketplace_messages'/i);
     return match ? match[1] : null;
 };
 
-const insertMarketplaceMessage = async (row) => {
-    let payload = { ...row };
-    for (let attempt = 0; attempt < 8; attempt++) {
-        const { data, error } = await supabase
-            .from('marketplace_messages')
-            .insert([payload])
-            .select()
-            .single();
-        if (!error) return data;
-        const missing = missingMessageColumn(error);
-        if (!missing) throw error;
-        delete payload[missing];
-        console.warn(`marketplace_messages is missing column ${missing}; retrying insert without it`);
+const insertMarketplaceMessage = async ({ listing_id, sender_id, receiver_id, text, family_space_id }) => {
+    // UAT's live table requires `content`. Extra columns can make PostgREST reject the
+    // whole row and a retry that strips `content` then hits the NOT NULL error.
+    const attempts = [
+        { listing_id, sender_id, receiver_id, content: text },
+        { listing_id, sender_id, receiver_id, content: text, message: text },
+        { listing_id, sender_id, receiver_id, content: text, message: text, family_space_id: family_space_id || null, read_status: false }
+    ];
+
+    let lastError = null;
+    for (const attempt of attempts) {
+        let payload = { ...attempt };
+        for (let i = 0; i < 6; i++) {
+            const { data, error } = await supabase
+                .from('marketplace_messages')
+                .insert([payload])
+                .select()
+                .single();
+            if (!error) return data;
+            lastError = error;
+            const missing = missingMessageColumn(error);
+            if (!missing || missing === 'content') break;
+            delete payload[missing];
+        }
     }
-    throw new Error('Could not send message: marketplace_messages schema mismatch');
+    throw lastError || new Error('Could not send message: marketplace_messages schema mismatch');
 };
 
 const normalizeMessage = (row) => {
@@ -36,7 +61,7 @@ export const sendMessage = async (req, res) => {
     try {
         const { id: sender_id } = req.user;
         const { listing_id, receiver_id } = req.body;
-        const text = String(req.body.message ?? req.body.content ?? req.body.text ?? '').trim();
+        const text = pickText(req.body.message, req.body.content, req.body.text, req.body.body);
         let { family_space_id } = req.body;
 
         if (!listing_id || !receiver_id || !text) {
@@ -52,15 +77,12 @@ export const sendMessage = async (req, res) => {
             family_space_id = listing?.family_space_id || null;
         }
 
-        // Live UAT has NOT NULL `content`; newer schema uses `message`. Write both.
         const data = await insertMarketplaceMessage({
-            family_space_id: family_space_id || null,
             listing_id,
             sender_id,
             receiver_id,
-            message: text,
-            content: text,
-            read_status: false
+            text,
+            family_space_id
         });
 
         res.status(201).json({ message: 'Message sent successfully', data: normalizeMessage(data) });

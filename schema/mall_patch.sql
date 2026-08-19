@@ -20,8 +20,27 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'marketplace_messages' AND column_name = 'content'
     ) THEN
         UPDATE public.marketplace_messages SET message = content WHERE message IS NULL AND content IS NOT NULL;
-        UPDATE public.marketplace_messages SET content = message WHERE content IS NULL AND message IS NOT NULL;
+        UPDATE public.marketplace_messages SET content = COALESCE(content, message, '') WHERE content IS NULL;
     END IF;
 END $$;
+
+ALTER TABLE public.marketplace_messages ALTER COLUMN content SET DEFAULT '';
+
+CREATE OR REPLACE FUNCTION public.sync_marketplace_message_text()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.content := COALESCE(NULLIF(NEW.content, ''), NEW.message, '');
+    NEW.message := COALESCE(NULLIF(NEW.message, ''), NEW.content, '');
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sync_marketplace_message_text ON public.marketplace_messages;
+CREATE TRIGGER trg_sync_marketplace_message_text
+BEFORE INSERT OR UPDATE ON public.marketplace_messages
+FOR EACH ROW
+EXECUTE PROCEDURE public.sync_marketplace_message_text();
 
 NOTIFY pgrst, 'reload schema';
