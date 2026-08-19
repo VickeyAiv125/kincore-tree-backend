@@ -14,7 +14,10 @@ import { upload } from '../../shared/controllers/mediaController.js';
 const router = express.Router();
 
 router.get('/', authMiddleware, getEvents);
-router.post('/', authMiddleware, upload.single('cover_photo'), createEvent);
+router.post('/', authMiddleware, upload.fields([{ name: 'cover_photo', maxCount: 1 }, { name: 'cover_image', maxCount: 1 }]), (req, res, next) => {
+    req.file = req.files?.cover_photo?.[0] || req.files?.cover_image?.[0] || req.file;
+    next();
+}, createEvent);
 
 
 // Tier 6: Management

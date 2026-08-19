@@ -141,11 +141,30 @@ export const AuthService = {
             });
         }
 
-        return { user: data.user, assignedRole };
+        return { user: data.user, assignedRole, requires_email_confirmation: !data.session };
     },
 
-    async login({ email, password }) {
-        const cleanEmail = email.trim().toLowerCase().replace(/[“”"']/g, '');
+    async login({ email, password, identifier }) {
+        const raw = String(identifier || email || '').trim().toLowerCase().replace(/[“”"']/g, '');
+        if (!raw || !password) {
+            throw new Error('Email or username and password are required');
+        }
+
+        let cleanEmail = raw;
+        if (!cleanEmail.includes('@')) {
+            const { data: byHandle, error: handleError } = await supabase
+                .from('users')
+                .select('email')
+                .ilike('wallet_handle', raw)
+                .maybeSingle();
+            if (handleError) throw handleError;
+            if (byHandle?.email) {
+                cleanEmail = byHandle.email.trim().toLowerCase();
+            } else {
+                throw new Error('Use your email address, wallet handle, or sign in with Google, Facebook, or KCC.');
+            }
+        }
+
         const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
 
         if (error) throw error;

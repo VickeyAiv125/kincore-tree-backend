@@ -1,6 +1,30 @@
 import { supabase } from '../../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../../config/storageClient.js';
 
+const LISTING_COLUMNS = [
+    'title', 'description', 'price', 'category', 'condition', 'location',
+    'image_urls', 'is_negotiable', 'status', 'moderation_status',
+    'family_moderation_status', 'moderation_note', 'family_space_id'
+];
+
+export const pickListingFields = (body = {}) => {
+    const row = {};
+    for (const key of LISTING_COLUMNS) {
+        if (body[key] === undefined) continue;
+        if (key === 'price') {
+            const n = parseFloat(body[key]);
+            row[key] = Number.isFinite(n) ? n : body[key];
+            continue;
+        }
+        if (key === 'is_negotiable') {
+            row[key] = body[key] === true || body[key] === 'true' || body[key] === '1';
+            continue;
+        }
+        row[key] = body[key] === '' ? null : body[key];
+    }
+    return row;
+};
+
 /**
  * List marketplace listings with search, category, and condition filters.
  * GET /api/marketplace?search=&category=&condition=&family_space_id=
@@ -12,7 +36,7 @@ export const getListings = async (req, res) => {
 
         let query = supabase
             .from('marketplace_listings')
-            .select('*, seller:users!marketplace_listings_seller_id_fkey(first_name, last_name, avatar_url)')
+            .select('*, seller:users!seller_id(first_name, last_name, avatar_url)')
             .neq('status', 'deleted')
             .order('created_at', { ascending: false });
 
@@ -80,7 +104,7 @@ export const getListing = async (req, res) => {
 
         const { data, error } = await supabase
             .from('marketplace_listings')
-            .select('*, seller:users!marketplace_listings_seller_id_fkey(first_name, last_name, avatar_url)')
+            .select('*, seller:users!seller_id(first_name, last_name, avatar_url)')
             .eq('id', id)
             .single();
 
@@ -153,6 +177,7 @@ export const createListing = async (req, res) => {
                 image_urls,
                 status: initialStatus,
                 moderation_status: initialModeration,
+                family_moderation_status: initialModeration,
             })
             .select()
             .single();
@@ -187,7 +212,12 @@ export const updateListing = async (req, res) => {
     try {
         const { id } = req.params;
         const { user } = req;
-        const updates = req.body;
+        const updates = pickListingFields(req.body);
+        delete updates.status;
+        delete updates.moderation_status;
+        delete updates.family_moderation_status;
+        delete updates.seller_id;
+        delete updates.family_space_id;
 
         // Ensure only seller can update
         const { data: existing, error: fetchErr } = await supabase

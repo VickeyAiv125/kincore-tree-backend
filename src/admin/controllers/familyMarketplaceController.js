@@ -1,5 +1,6 @@
 import { supabase } from '../../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../../config/storageClient.js';
+import { pickListingFields } from '../../app/controllers/marketplaceController.js';
 
 export const getPendingListings = async (req, res) => {
     try {
@@ -7,7 +8,7 @@ export const getPendingListings = async (req, res) => {
 
         const { data, error } = await supabase
             .from('marketplace_listings')
-            .select('*, seller:users!marketplace_listings_seller_id_fkey(first_name, last_name, avatar_url, email)')
+            .select('*, seller:users!seller_id(first_name, last_name, avatar_url, email)')
             .eq('family_space_id', id)
             // Fetch everything except deleted or fully globally rejected (optional: you might want to show rejected)
             .neq('status', 'deleted')
@@ -49,7 +50,7 @@ export const approveListing = async (req, res) => {
             details: { family_space_id: id }
         });
 
-        res.json({ message: 'Listing approved by family admin, waiting for platform approval.', listing: data });
+        res.json({ message: 'Listing approved by family admin.', listing: data });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -143,7 +144,6 @@ export const createListing = async (req, res) => {
 export const updateListing = async (req, res) => {
     try {
         const { id, listingId } = req.params;
-        const updates = req.body;
         const { user } = req;
 
         let image_urls = [];
@@ -155,6 +155,9 @@ export const updateListing = async (req, res) => {
                 image_urls.push(url);
             }
         }
+
+        const updates = pickListingFields(req.body);
+        delete updates.seller_id;
 
         const updateData = {
             ...updates,

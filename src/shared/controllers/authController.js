@@ -24,11 +24,14 @@ import {
 
 export const signup = async (req, res) => {
     try {
-        const { user, assignedRole } = await AuthService.signup(req.body);
+        const { user, assignedRole, requires_email_confirmation } = await AuthService.signup(req.body);
         res.status(201).json({
-            message: 'User registered successfully',
+            message: requires_email_confirmation
+                ? 'Account created. Please check your email to confirm before signing in.'
+                : 'User registered successfully',
             user,
-            assigned_role: assignedRole || 'standard_user'
+            assigned_role: assignedRole || 'standard_user',
+            requires_email_confirmation: !!requires_email_confirmation
         });
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -37,7 +40,8 @@ export const signup = async (req, res) => {
 
 export const login = async (req, res) => {
     try {
-        const result = await AuthService.login(req.body);
+        const { email, password, identifier } = req.body;
+        const result = await AuthService.login({ email, password, identifier });
         res.json({ message: 'Login successful', ...result });
     } catch (err) {
         res.status(401).json({ error: err.message });

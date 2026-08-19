@@ -9,7 +9,7 @@ class InviteApi {
     required this.getAccessToken,
   });
 
-  /// e.g. https://uat.api.kincore.com
+  /// e.g. https://uat-api.kincore.com
   final String baseUrl;
   final Future<String?> Function() getAccessToken;
 

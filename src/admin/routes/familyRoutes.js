@@ -113,7 +113,10 @@ router.post('/:id/custom-labels', authMiddleware, requireFamilyRole('id', ['owne
 router.patch('/:id/members/:userId/resolve', authMiddleware, requireFamilyRole('id', ['owner', 'admin']), resolveJoinRequest);
 router.get('/:id/events', authMiddleware, getFamilyEvents);
 router.get('/events/:eventId', authMiddleware, getEventById);
-router.post('/:id/events', authMiddleware, upload.single('cover_photo'), createEvent);
+router.post('/:id/events', authMiddleware, upload.fields([{ name: 'cover_photo', maxCount: 1 }, { name: 'cover_image', maxCount: 1 }]), (req, res, next) => {
+    req.file = req.files?.cover_photo?.[0] || req.files?.cover_image?.[0] || req.file;
+    next();
+}, createEvent);
 router.put('/events/:eventId', authMiddleware, upload.single('cover_image'), updateEventById);
 router.delete('/events/:eventId', authMiddleware, deleteEventById);
 

@@ -1,6 +1,50 @@
 import { supabase } from '../../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../../config/storageClient.js';
 
+const PROFILE_USER_COLUMNS =
+    'first_name, last_name, avatar_url, bio, date_of_birth, place_of_birth, occupation, gender, company_name, website, linkedin, instagram, facebook, other_link';
+
+const COMPANY_LINK_FIELDS = [
+    'company_name',
+    'website',
+    'linkedin',
+    'instagram',
+    'facebook',
+    'other_link'
+];
+
+const pickCompanyLinks = (user = {}) => ({
+    company_name: user.company_name ?? null,
+    website: user.website ?? null,
+    linkedin: user.linkedin ?? null,
+    instagram: user.instagram ?? null,
+    facebook: user.facebook ?? null,
+    other_link: user.other_link ?? null
+});
+
+const extractCompanyLinkUpdates = (body = {}) => {
+    const updates = {};
+    const aliases = {
+        company_name: ['company_name', 'companyName', 'company name'],
+        website: ['website'],
+        linkedin: ['linkedin', 'linked_in', 'linkedIn'],
+        instagram: ['instagram'],
+        facebook: ['facebook'],
+        other_link: ['other_link', 'otherLink', 'other link']
+    };
+
+    for (const field of COMPANY_LINK_FIELDS) {
+        const keys = aliases[field] || [field];
+        for (const key of keys) {
+            if (body[key] !== undefined) {
+                updates[field] = body[key];
+                break;
+            }
+        }
+    }
+    return updates;
+};
+
 /**
  * Helper: Build Family Tree Graph to find relatives
  */
@@ -63,7 +107,7 @@ export const getProfile = async (req, res) => {
         // 1. Get Base User Info
         const { data: user, error: userError } = await supabase
             .from('users')
-            .select('first_name, last_name, avatar_url, bio, date_of_birth, place_of_birth, occupation, gender')
+            .select(PROFILE_USER_COLUMNS)
             .eq('id', userId)
             .single();
 
@@ -163,13 +207,16 @@ export const getProfile = async (req, res) => {
                 date_of_birth: user.date_of_birth,
                 place_of_birth: user.place_of_birth,
                 occupation: user.occupation,
-                spaces_count: spaceCount || 0
+                spaces_count: spaceCount || 0,
+                ...pickCompanyLinks(user)
             },
+            company_links: pickCompanyLinks(user),
             vital_statistics: {
                 full_name: fullName,
                 born: user.date_of_birth,
                 location: user.place_of_birth,
-                occupation: user.occupation
+                occupation: user.occupation,
+                ...pickCompanyLinks(user)
             },
             family_members: relatives.map(r => ({
                 id: r.id,
@@ -195,7 +242,10 @@ export const updateProfile = async (req, res) => {
         const userId = req.user.id;
         const { bio, first_name, last_name, date_of_birth, place_of_birth, occupation } = req.body;
 
-        const updates = { updated_at: new Date().toISOString() };
+        const updates = {
+            updated_at: new Date().toISOString(),
+            ...extractCompanyLinkUpdates(req.body)
+        };
         if (bio !== undefined) updates.bio = bio;
         if (first_name !== undefined) updates.first_name = first_name;
         if (last_name !== undefined) updates.last_name = last_name;
@@ -217,7 +267,7 @@ export const updateProfile = async (req, res) => {
             .from('users')
             .update(updates)
             .eq('id', userId)
-            .select('first_name, last_name, avatar_url, bio, date_of_birth, place_of_birth, occupation')
+            .select(PROFILE_USER_COLUMNS)
             .single();
 
         if (error) throw error;
@@ -225,7 +275,11 @@ export const updateProfile = async (req, res) => {
         res.json({
             success: true,
             message: 'Profile updated successfully',
-            profile: data
+            profile: {
+                ...data,
+                ...pickCompanyLinks(data)
+            },
+            company_links: pickCompanyLinks(data)
         });
 
     } catch (err) {

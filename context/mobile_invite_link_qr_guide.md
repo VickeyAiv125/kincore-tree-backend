@@ -1,6 +1,6 @@
 # Mobile: Family invite link & QR (API-focused)
 
-Base URL: `https://uat.api.kincore.com`
+Base URL: `https://uat-api.kincore.com`
 
 ## Admin — share invite + QR
 

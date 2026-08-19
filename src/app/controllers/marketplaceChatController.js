@@ -7,16 +7,26 @@ import { supabase } from '../../config/supabaseClient.js';
 export const sendMessage = async (req, res) => {
     try {
         const { id: sender_id } = req.user;
-        const { family_space_id, listing_id, receiver_id, message } = req.body;
+        const { listing_id, receiver_id, message } = req.body;
+        let { family_space_id } = req.body;
 
-        if (!family_space_id || !listing_id || !receiver_id || !message) {
-            return res.status(400).json({ error: 'family_space_id, listing_id, receiver_id, and message are required' });
+        if (!listing_id || !receiver_id || !message) {
+            return res.status(400).json({ error: 'listing_id, receiver_id, and message are required' });
+        }
+
+        if (!family_space_id) {
+            const { data: listing } = await supabase
+                .from('marketplace_listings')
+                .select('family_space_id, seller_id')
+                .eq('id', listing_id)
+                .maybeSingle();
+            family_space_id = listing?.family_space_id || null;
         }
 
         const { data, error } = await supabase
             .from('marketplace_messages')
             .insert([{
-                family_space_id,
+                family_space_id: family_space_id || null,
                 listing_id,
                 sender_id,
                 receiver_id,
@@ -31,7 +41,7 @@ export const sendMessage = async (req, res) => {
         res.status(201).json({ message: 'Message sent successfully', data });
     } catch (err) {
         console.error('Error sending message:', err);
-        res.status(500).json({ error: 'Server error' });
+        res.status(500).json({ error: err.message || 'Server error' });
     }
 };
 
@@ -44,19 +54,23 @@ export const getChatHistory = async (req, res) => {
         const { id: current_user_id } = req.user;
         const { family_space_id, listing_id, other_user_id } = req.query;
 
-        if (!family_space_id || !listing_id || !other_user_id) {
-            return res.status(400).json({ error: 'family_space_id, listing_id, and other_user_id are required' });
+        if (!listing_id || !other_user_id) {
+            return res.status(400).json({ error: 'listing_id and other_user_id are required' });
         }
 
         // Fetch all messages between these two users for this listing
-        const { data: messages, error } = await supabase
+        let query = supabase
             .from('marketplace_messages')
             .select('*')
-            .eq('family_space_id', family_space_id)
             .eq('listing_id', listing_id)
             .or(`and(sender_id.eq.${current_user_id},receiver_id.eq.${other_user_id}),and(sender_id.eq.${other_user_id},receiver_id.eq.${current_user_id})`)
             .order('created_at', { ascending: true });
 
+        if (family_space_id) {
+            query = query.eq('family_space_id', family_space_id);
+        }
+
+        const { data: messages, error } = await query;
         if (error) throw error;
 
         // Mark unread messages sent by the other user as read asynchronously
@@ -77,7 +91,7 @@ export const getChatHistory = async (req, res) => {
         res.status(200).json({ data: messages });
     } catch (err) {
         console.error('Error fetching chat history:', err);
-        res.status(500).json({ error: 'Server error' });
+        res.status(500).json({ error: err.message || 'Server error' });
     }
 };
 
@@ -90,20 +104,20 @@ export const getConversations = async (req, res) => {
         const { id: current_user_id } = req.user;
         const { family_space_id } = req.query;
 
-        if (!family_space_id) {
-            return res.status(400).json({ error: 'family_space_id is required' });
-        }
-
-        // Fetch all messages involving the user in this family space
-        const { data: messages, error } = await supabase
+        let query = supabase
             .from('marketplace_messages')
             .select(`
                 *,
                 listing:marketplace_listings (id, title, image_urls)
             `)
-            .eq('family_space_id', family_space_id)
             .or(`sender_id.eq.${current_user_id},receiver_id.eq.${current_user_id}`)
             .order('created_at', { ascending: false });
+
+        if (family_space_id) {
+            query = query.eq('family_space_id', family_space_id);
+        }
+
+        const { data: messages, error } = await query;
 
         if (error) throw error;
 
@@ -151,7 +165,7 @@ export const getConversations = async (req, res) => {
                         title: listing.title,
                         thumbnail: listing.image_urls && listing.image_urls.length > 0 ? listing.image_urls[0] : null
                     },
-                    latest_message: msg.message,
+                    latest_message: msg.message || msg.content,
                     latest_timestamp: msg.created_at,
                     unread_count: 0
                 };
@@ -170,6 +184,6 @@ export const getConversations = async (req, res) => {
         res.status(200).json({ data: conversationsList });
     } catch (err) {
         console.error('Error fetching conversations:', err);
-        res.status(500).json({ error: 'Server error' });
+        res.status(500).json({ error: err.message || 'Server error' });
     }
 };

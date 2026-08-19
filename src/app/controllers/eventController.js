@@ -31,28 +31,21 @@ export const getEvents = async (req, res) => {
  */
 export const createEvent = async (req, res) => {
     try {
-        const { invited_user_ids, ...rest } = req.body;
         const { user } = req;
 
         const event = await EventService.createEvent({
-            ...rest,
+            ...req.body,
             creator_id: user.id
         }, req.file);
 
-        // Handle invitations (existing logic kept but cleaned)
-        if (invited_user_ids) {
-            const ids = Array.isArray(invited_user_ids) ? invited_user_ids : JSON.parse(invited_user_ids);
-            const { data: validUsers } = await supabase.from('users').select('id').in('id', ids);
-            const validIds = validUsers?.map(u => u.id) || [];
-
-            if (validIds.length > 0) {
-                await supabase.from('event_rsvps').insert(validIds.map(uid => ({
-                    event_id: event.id,
-                    user_id: uid,
-                    status: 'pending'
-                })));
-
-                for (const invitedId of validIds) {
+        const invitedRaw = req.body.invited_user_ids;
+        if (invitedRaw) {
+            let ids = invitedRaw;
+            if (typeof invitedRaw === 'string') {
+                try { ids = JSON.parse(invitedRaw); } catch { ids = invitedRaw.split(',').map((s) => s.trim()).filter(Boolean); }
+            }
+            if (Array.isArray(ids)) {
+                for (const invitedId of ids) {
                     await createNotification({
                         user_id: invitedId,
                         type: 'EVENT_INVITE',

@@ -31,7 +31,7 @@ export const uploadMedia = async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded. Use multipart/form-data with field name "file".' });
 
-        const { family_space_id, visibility, attach_to_type, attach_to_id } = req.body;
+        const { family_space_id, visibility } = req.body;
         const { user } = req;
 
         if (!family_space_id) return res.status(400).json({ error: 'family_space_id is required' });
@@ -42,20 +42,28 @@ export const uploadMedia = async (req, res) => {
 
         const publicUrl = await uploadFile(BUCKETS.MEDIA, path, req.file.buffer, req.file.mimetype, family_space_id, user.id);
 
-        // Save media record to local DB
-        const { data, error } = await supabase.from('media').insert({
+        // Insert only columns present on the `media` table (see backend/schema.sql).
+        const mediaRow = {
             user_id: user.id,
             family_space_id,
             url: publicUrl,
             type: req.file.mimetype.startsWith('video') ? 'video' : 'image',
-            size: req.file.size,
             visibility: visibility || 'family',
-            attach_to_type: attach_to_type || null,
-            attach_to_id: attach_to_id || null
-        }).select().single();
+        };
 
-        if (error) throw error;
-        res.status(201).json({ message: 'File uploaded successfully', media: data });
+        const { data, error } = await supabase.from('media').insert(mediaRow).select().single();
+
+        if (error) {
+            // Storage succeeded — still return the URL so tree/person forms can use the photo.
+            console.warn('[uploadMedia] DB insert failed:', error.message);
+            return res.status(201).json({
+                message: 'File uploaded successfully',
+                media: { ...mediaRow, id: null },
+                url: publicUrl,
+            });
+        }
+
+        res.status(201).json({ message: 'File uploaded successfully', media: data, url: publicUrl });
     } catch (err) {
         // Auto-log storage failures so the DevOps dashboard tracks Failed Uploads
         await supabase.from('system_incidents').insert({

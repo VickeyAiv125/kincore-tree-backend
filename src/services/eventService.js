@@ -1,6 +1,79 @@
 import { supabase } from '../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../config/storageClient.js';
 
+const EVENT_COLUMNS = new Set([
+    'family_space_id',
+    'creator_id',
+    'title',
+    'description',
+    'start_date',
+    'end_date',
+    'location',
+    'max_participants',
+    'status',
+    'visibility',
+    'cover_image',
+    'cover_photo_url',
+    'event_type',
+    'event_time',
+    'rsvp_deadline',
+    'branch_name',
+    'audience',
+    'invite_methods',
+    'reminders',
+    'guests_allowed',
+    'request_rsvp',
+    'include_gift_exchange',
+    'send_reminders'
+]);
+
+const toBool = (value) => value === true || value === 'true' || value === '1';
+
+const parseIdList = (raw) => {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.filter(Boolean);
+    if (typeof raw === 'string') {
+        try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed.filter(Boolean);
+        } catch {
+            return raw.split(',').map((s) => s.trim()).filter(Boolean);
+        }
+    }
+    return [];
+};
+
+const pickEventRow = (raw = {}) => {
+    const row = {};
+    for (const [key, value] of Object.entries(raw)) {
+        if (!EVENT_COLUMNS.has(key) || value === undefined) continue;
+        if (key === 'request_rsvp' || key === 'include_gift_exchange' || key === 'send_reminders') {
+            row[key] = toBool(value);
+            continue;
+        }
+        row[key] = value === '' ? null : value;
+    }
+    return row;
+};
+
+const missingEventsColumn = (error) => {
+    const match = String(error?.message || '').match(/Could not find the '([^']+)' column of 'events'/i);
+    return match ? match[1] : null;
+};
+
+const insertEventRow = async (row) => {
+    let payload = { ...row };
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const { data, error } = await supabase.from('events').insert([payload]).select().single();
+        if (!error) return data;
+        const missing = missingEventsColumn(error);
+        if (!missing) throw error;
+        delete payload[missing];
+        console.warn(`events is missing column ${missing}; retrying insert without it`);
+    }
+    throw new Error("Could not create event: events table is missing columns. Run backend/schema/patch_missing_columns.sql then NOTIFY pgrst, 'reload schema';");
+};
+
 export const EventService = {
     /**
      * Comprehensive event fetcher.
@@ -131,6 +204,16 @@ export const EventService = {
             guests_allowed,
             ...insertData 
         } = eventData;
+
+        if (!insertData.family_space_id) throw new Error('family_space_id is required');
+        if (!insertData.title) throw new Error('title is required');
+        if (!insertData.start_date) throw new Error('start_date is required');
+
+        const includeGift = toBool(insertData.include_gift_exchange) || toBool(is_secret_santa);
+        const sendReminders = toBool(insertData.send_reminders);
+        insertData.include_gift_exchange = includeGift;
+        insertData.send_reminders = sendReminders;
+        insertData.request_rsvp = toBool(insertData.request_rsvp);
         
         let coverImageUrl = insertData.cover_photo_url || insertData.cover_image;
 
@@ -150,22 +233,24 @@ export const EventService = {
         const metaTag = `\n\n<!--RITUAL_DATA:${JSON.stringify(ritualMetadata)}-->`;
         insertData.description = (insertData.description || '') + metaTag;
 
-        const { data: event, error: eventError } = await supabase
-            .from('events')
-            .insert([{
-                ...insertData,
-                audience: audience || 'Entire family',
-                invite_methods: invite_methods ? (typeof invite_methods === 'string' ? JSON.parse(invite_methods) : invite_methods) : { notification: true, email: false },
-                reminders: reminders ? (typeof reminders === 'string' ? JSON.parse(reminders) : reminders) : ['1d before'],
-                guests_allowed: guests_allowed || 0,
-                cover_photo_url: coverImageUrl,
-                cover_image: coverImageUrl,
-                created_at: new Date().toISOString()
-            }])
-            .select()
-            .single();
+        const parsedInviteMethods = invite_methods
+            ? (typeof invite_methods === 'string' ? JSON.parse(invite_methods) : invite_methods)
+            : { notification: sendReminders, email: false };
 
-        if (eventError) throw eventError;
+        const parsedReminders = reminders
+            ? (typeof reminders === 'string' ? JSON.parse(reminders) : reminders)
+            : (sendReminders ? ['1d before'] : []);
+
+        const event = await insertEventRow({
+            ...pickEventRow(insertData),
+            audience: audience || 'Entire family',
+            invite_methods: parsedInviteMethods,
+            reminders: parsedReminders,
+            guests_allowed: guests_allowed || 0,
+            cover_photo_url: coverImageUrl,
+            cover_image: coverImageUrl,
+            created_at: new Date().toISOString()
+        });
 
         try {
             if (insertData.family_space_id) {
@@ -183,50 +268,48 @@ export const EventService = {
             }
         } catch (_) { /* non-blocking */ }
 
-        // Handle Secret Santa initialization
-        if (is_secret_santa === true || is_secret_santa === 'true') {
-            const santa = typeof secret_santa_data === 'string' ? JSON.parse(secret_santa_data) : secret_santa_data;
-            if (santa) {
-                const { data: exchange, error: ssError } = await supabase
-                    .from('secret_santa_exchanges')
-                    .insert({
-                        event_id: event.id,
-                        budget_min: santa.budgetMin,
-                        budget_max: santa.budgetMax,
-                        gift_deadline: santa.giftDeadline,
-                        notes: santa.notes,
-                        anonymous_mode: santa.anonymousMode,
-                        is_locked: santa.isLocked || false
-                    })
-                    .select()
-                    .single();
+        // Handle Secret Santa / gift exchange
+        if (includeGift || is_secret_santa === true || is_secret_santa === 'true') {
+            const santa = typeof secret_santa_data === 'string' ? JSON.parse(secret_santa_data) : (secret_santa_data || {});
+            const { data: exchange, error: ssError } = await supabase
+                .from('secret_santa_exchanges')
+                .insert({
+                    event_id: event.id,
+                    budget_min: santa.budgetMin || 0,
+                    budget_max: santa.budgetMax || 0,
+                    gift_deadline: santa.giftDeadline || null,
+                    notes: santa.notes || null,
+                    anonymous_mode: santa.anonymousMode !== false,
+                    is_locked: santa.isLocked || false
+                })
+                .select()
+                .single();
                 
-                if (ssError) {
-                    console.error('Secret Santa initialization error:', ssError);
-                } else if (santa.pairings && santa.pairings.length > 0) {
-                    // Save specific pairings if they were finalized in the preview
-                    const pairingsToInsert = santa.pairings.map(p => ({
-                        exchange_id: exchange.id,
-                        giver_id: p.giver_id,
-                        receiver_id: p.receiver_id
-                    }));
+            if (ssError) {
+                console.error('Secret Santa initialization error:', ssError);
+            } else if (santa.pairings && santa.pairings.length > 0) {
+                const pairingsToInsert = santa.pairings.map(p => ({
+                    exchange_id: exchange.id,
+                    giver_id: p.giver_id,
+                    receiver_id: p.receiver_id
+                }));
                     
-                    const { error: pError } = await supabase.from('secret_santa_pairings').insert(pairingsToInsert);
-                    if (pError) {
-                        console.error('Pairing insertion error:', pError);
-                    } else {
-                        // Mark as drawn since pairings are already set
-                        await supabase.from('secret_santa_exchanges').update({ is_drawn: true }).eq('id', exchange.id);
-                    }
+                const { error: pError } = await supabase.from('secret_santa_pairings').insert(pairingsToInsert);
+                if (pError) {
+                    console.error('Pairing insertion error:', pError);
+                } else {
+                    await supabase.from('secret_santa_exchanges').update({ is_drawn: true }).eq('id', exchange.id);
                 }
             }
         }
 
         // Handle Invitations
-        if (invited_user_ids) {
-            const ids = Array.isArray(invited_user_ids) ? invited_user_ids : JSON.parse(invited_user_ids);
-            if (ids.length > 0) {
-                const rsvps = ids.map(uid => ({
+        const inviteIds = parseIdList(invited_user_ids);
+        if (inviteIds.length > 0) {
+            const { data: validUsers } = await supabase.from('users').select('id').in('id', inviteIds);
+            const validIds = (validUsers || []).map((u) => u.id);
+            if (validIds.length > 0) {
+                const rsvps = validIds.map(uid => ({
                     event_id: event.id,
                     user_id: uid,
                     status: 'pending'
@@ -285,7 +368,7 @@ export const EventService = {
         const { data, error } = await supabase
             .from('events')
             .update({
-                ...updateData,
+                ...pickEventRow(updateData),
                 cover_photo_url: coverImageUrl,
                 cover_image: coverImageUrl
             })

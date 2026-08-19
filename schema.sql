@@ -1,3 +1,4 @@
+-- DEPRECATED: use backend/schema/full_schema.sql for the complete, up-to-date schema.
 -- Kincore Tree - Supabase Schema (v3.2)
 -- Perfectly aligned with 130-Endpoint PRD and Action Plan
 
