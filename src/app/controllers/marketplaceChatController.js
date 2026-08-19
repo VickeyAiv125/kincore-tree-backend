@@ -22,10 +22,12 @@ const missingMessageColumn = (error) => {
 const insertMarketplaceMessage = async ({ listing_id, sender_id, receiver_id, text, family_space_id }) => {
     // UAT's live table requires `content`. Extra columns can make PostgREST reject the
     // whole row and a retry that strips `content` then hits the NOT NULL error.
+    const withSpace = family_space_id ? { family_space_id } : {};
     const attempts = [
-        { listing_id, sender_id, receiver_id, content: text },
-        { listing_id, sender_id, receiver_id, content: text, message: text },
-        { listing_id, sender_id, receiver_id, content: text, message: text, family_space_id: family_space_id || null, read_status: false }
+        { listing_id, sender_id, receiver_id, content: text, ...withSpace },
+        { listing_id, sender_id, receiver_id, content: text, message: text, ...withSpace },
+        { listing_id, sender_id, receiver_id, content: text, message: text, read_status: false, ...withSpace },
+        { listing_id, sender_id, receiver_id, content: text }
     ];
 
     let lastError = null;
@@ -99,27 +101,46 @@ export const sendMessage = async (req, res) => {
 export const getChatHistory = async (req, res) => {
     try {
         const { id: current_user_id } = req.user;
-        const { family_space_id, listing_id, other_user_id } = req.query;
+        const listing_id = req.query.listing_id || req.query.listingId;
+        const other_user_id = req.query.other_user_id || req.query.receiver_id || req.query.seller_id || req.query.user_id;
 
         if (!listing_id || !other_user_id) {
             return res.status(400).json({ error: 'listing_id and other_user_id are required' });
         }
 
-        // Fetch all messages between these two users for this listing
-        let query = supabase
+        // Do not filter family_space_id: send often stores it as null, and
+        // `.eq(family_space_id)` then hides the conversation. Nested PostgREST
+        // `and()` inside `or()` also returns empty on some caches — filter in JS.
+        let { data: messages, error } = await supabase
             .from('marketplace_messages')
             .select('*')
             .eq('listing_id', listing_id)
-            .or(`and(sender_id.eq.${current_user_id},receiver_id.eq.${other_user_id}),and(sender_id.eq.${other_user_id},receiver_id.eq.${current_user_id})`)
+            .or(`sender_id.eq.${current_user_id},receiver_id.eq.${current_user_id}`)
             .order('created_at', { ascending: true });
 
-        if (family_space_id) {
-            query = query.eq('family_space_id', family_space_id);
+        if (error || !(messages || []).length) {
+            const retry = await supabase
+                .from('marketplace_messages')
+                .select('*')
+                .eq('listing_id', listing_id)
+                .order('created_at', { ascending: true });
+            if (!retry.error && retry.data?.length) {
+                messages = retry.data;
+                error = null;
+            } else if (error) {
+                throw error;
+            }
         }
 
-        const { data: messages, error } = await query;
-        if (error) throw error;
-        const normalized = (messages || []).map(normalizeMessage);
+        const thread = (messages || []).filter((msg) => {
+            const sender = String(msg.sender_id || '');
+            const receiver = String(msg.receiver_id || '');
+            const me = String(current_user_id);
+            const other = String(other_user_id);
+            return (sender === me && receiver === other) || (sender === other && receiver === me);
+        });
+
+        const normalized = thread.map(normalizeMessage);
 
         // Mark unread messages sent by the other user as read asynchronously
         const unreadMessageIds = normalized
@@ -150,7 +171,6 @@ export const getChatHistory = async (req, res) => {
 export const getConversations = async (req, res) => {
     try {
         const { id: current_user_id } = req.user;
-        const { family_space_id } = req.query;
 
         let query = supabase
             .from('marketplace_messages')
@@ -160,10 +180,6 @@ export const getConversations = async (req, res) => {
             `)
             .or(`sender_id.eq.${current_user_id},receiver_id.eq.${current_user_id}`)
             .order('created_at', { ascending: false });
-
-        if (family_space_id) {
-            query = query.eq('family_space_id', family_space_id);
-        }
 
         const { data: messages, error } = await query;
 
