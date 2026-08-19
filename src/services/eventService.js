@@ -56,22 +56,75 @@ const pickEventRow = (raw = {}) => {
     return row;
 };
 
+const CORE_EVENT_COLUMNS = new Set([
+    'family_space_id',
+    'creator_id',
+    'title',
+    'description',
+    'start_date',
+    'end_date',
+    'location',
+    'cover_image',
+    'event_time',
+    'status',
+    'visibility',
+    'event_type',
+    'created_at',
+    'max_participants',
+    'branch_name',
+    'rsvp_deadline'
+]);
+
 const missingEventsColumn = (error) => {
-    const match = String(error?.message || '').match(/Could not find the '([^']+)' column of 'events'/i);
+    const blob = [
+        error?.message,
+        error?.details,
+        error?.hint,
+        error?.error,
+        typeof error === 'string' ? error : ''
+    ].filter(Boolean).join(' ');
+    const match = blob.match(/Could not find the ['"`]?([^'"`\s]+)['"`]? column of ['"`]?events['"`]?/i);
     return match ? match[1] : null;
 };
 
 const insertEventRow = async (row) => {
-    let payload = { ...row };
-    for (let attempt = 0; attempt < 8; attempt++) {
+    const core = {};
+    const optional = {};
+    for (const [key, value] of Object.entries(row)) {
+        if (value === undefined) continue;
+        if (CORE_EVENT_COLUMNS.has(key)) core[key] = value;
+        else optional[key] = value;
+    }
+
+    let payload = { ...core };
+    let event = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
         const { data, error } = await supabase.from('events').insert([payload]).select().single();
-        if (!error) return data;
+        if (!error) {
+            event = data;
+            break;
+        }
         const missing = missingEventsColumn(error);
         if (!missing) throw error;
         delete payload[missing];
         console.warn(`events is missing column ${missing}; retrying insert without it`);
     }
-    throw new Error("Could not create event: events table is missing columns. Run backend/schema/patch_missing_columns.sql then NOTIFY pgrst, 'reload schema';");
+    if (!event) {
+        throw new Error("Could not create event: events table is missing columns. Run backend/schema/patch_missing_columns.sql then NOTIFY pgrst, 'reload schema';");
+    }
+
+    const extra = { ...optional };
+    for (let attempt = 0; attempt < 10 && Object.keys(extra).length > 0; attempt++) {
+        const { data, error } = await supabase.from('events').update(extra).eq('id', event.id).select().single();
+        if (!error) return data;
+        const missing = missingEventsColumn(error);
+        if (!missing) {
+            console.warn('events optional column update failed:', error.message || error);
+            break;
+        }
+        delete extra[missing];
+    }
+    return event;
 };
 
 export const EventService = {
@@ -169,7 +222,10 @@ export const EventService = {
             participant_count: rsvps.filter(r => r.status === 'going' || r.status === 'accepted').length,
             hosted_by: event.creator ? `${event.creator.first_name} ${event.creator.last_name}` : (event.family?.name || 'Family'),
             host_avatar: event.creator?.avatar_url || '',
-            image_url: event.cover_image || event.cover_photo_url || ''
+            image_url: event.cover_image || event.cover_photo_url || '',
+            send_reminders: toBool(event.send_reminders) || toBool(event.invite_methods?.send_reminders) || toBool(event.invite_methods?.notification),
+            request_rsvp: toBool(event.request_rsvp) || toBool(event.invite_methods?.request_rsvp),
+            include_gift_exchange: toBool(event.include_gift_exchange) || toBool(event.invite_methods?.include_gift_exchange)
         };
     },
 
@@ -214,6 +270,10 @@ export const EventService = {
         insertData.include_gift_exchange = includeGift;
         insertData.send_reminders = sendReminders;
         insertData.request_rsvp = toBool(insertData.request_rsvp);
+
+        if (!coverFile && typeof insertData.cover_photo === 'string' && insertData.cover_photo.startsWith('http')) {
+            insertData.cover_photo_url = insertData.cover_photo_url || insertData.cover_photo;
+        }
         
         let coverImageUrl = insertData.cover_photo_url || insertData.cover_image;
 
@@ -233,9 +293,20 @@ export const EventService = {
         const metaTag = `\n\n<!--RITUAL_DATA:${JSON.stringify(ritualMetadata)}-->`;
         insertData.description = (insertData.description || '') + metaTag;
 
-        const parsedInviteMethods = invite_methods
-            ? (typeof invite_methods === 'string' ? JSON.parse(invite_methods) : invite_methods)
-            : { notification: sendReminders, email: false };
+        let parsedInviteMethods = { notification: sendReminders, email: false };
+        if (invite_methods) {
+            const parsed = typeof invite_methods === 'string' ? JSON.parse(invite_methods) : invite_methods;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                parsedInviteMethods = { ...parsed };
+            }
+        }
+        parsedInviteMethods = {
+            ...parsedInviteMethods,
+            notification: parsedInviteMethods.notification ?? sendReminders,
+            send_reminders: sendReminders,
+            request_rsvp: insertData.request_rsvp,
+            include_gift_exchange: includeGift
+        };
 
         const parsedReminders = reminders
             ? (typeof reminders === 'string' ? JSON.parse(reminders) : reminders)
