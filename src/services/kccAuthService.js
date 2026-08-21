@@ -41,15 +41,30 @@ export const loginWithKccId = async ({ identifier, password }) => {
 
     const loginData = await loginRes.json().catch(() => ({}));
     if (!loginRes.ok) {
-        const msg =
-            loginData.error_description
-            || loginData.message
-            || loginData.error
-            || 'KCC ID login failed';
-        const err = new Error(typeof msg === 'string' ? msg : 'KCC ID login failed');
-        err.status = loginRes.status;
-        err.payload = loginData;
-        throw err;
+        // Local Kincore admins (auditor@admin.com, etc.) are not KCC ID users.
+        // If ecosystem login fails, try the same email/password on Kincore.
+        try {
+            const local = await AuthService.login({ identifier: cleanId, password: cleanPass });
+            return {
+                ...local,
+                kcc: null,
+                login_via: 'kincore_local'
+            };
+        } catch {
+            const msg =
+                loginData.error_description
+                || loginData.message
+                || loginData.error
+                || 'KCC ID login failed';
+            const err = new Error(
+                typeof msg === 'string' && msg !== 'invalid_grant'
+                    ? msg
+                    : 'KCC ID did not accept these credentials. Use a KCC ID account, or sign in with Email / username for Kincore admin accounts such as auditor@admin.com.'
+            );
+            err.status = loginRes.status;
+            err.payload = loginData;
+            throw err;
+        }
     }
 
     // Wallet-style 2FA is usually skipped for client_id=kincore, but handle if returned
