@@ -44,6 +44,7 @@ import appPrivacyRoutes from './src/app/routes/appPrivacyRoutes.js';
 import profileRoutes from './src/app/routes/profileRoutes.js';
 import memberRoutes from './src/app/routes/memberRoutes.js';
 import calculatorRoutes from './src/app/routes/calculatorRoutes.js';
+import plenorAppRoutes from './src/app/routes/plenorAppRoutes.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -99,6 +100,7 @@ app.use('/api/app/privacy', appPrivacyRoutes);
 app.use('/api/app/profile', profileRoutes);
 app.use('/api/app/members', memberRoutes);
 app.use('/api/app/calculator', calculatorRoutes);
+app.use('/api/v1/app', plenorAppRoutes);
 
 app.get('/health', (req, res) => {
     res.json({ status: 'v3.1.foundation.active', timestamp: new Date().toISOString() });

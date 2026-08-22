@@ -2,14 +2,39 @@ import { supabase } from '../../config/supabaseClient.js';
 import { clientApi } from '../../services/clientApiService.js';
 
 /**
- * Proxy product listing from BigK.
+ * Proxy PlenorHub mall catalog: GET /api/v1/app/products
  */
 export const getProducts = async (req, res) => {
     try {
-        const products = await clientApi.getProducts();
+        const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || null;
+        const products = await clientApi.getAppProducts(req.query, token);
         res.json(products);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        const status = err.response?.status || 502;
+        res.status(status).json(err.response?.data || { error: err.message });
+    }
+};
+
+export const getProductById = async (req, res) => {
+    try {
+        const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || null;
+        const product = await clientApi.getAppProductById(req.params.id, req.query, token);
+        res.json(product);
+    } catch (err) {
+        const status = err.response?.status || 502;
+        res.status(status).json(err.response?.data || { error: err.message });
+    }
+};
+
+export const getShippingRates = async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) return res.status(401).json({ error: 'Authorization bearer token is required' });
+        const data = await clientApi.getShippingRates(token, req.body);
+        res.json(data);
+    } catch (err) {
+        const status = err.status || 500;
+        res.status(status).json(err.payload || { error: err.message, missing: err.missing });
     }
 };
 
@@ -25,7 +50,9 @@ export const createOrder = async (req, res) => {
         // 1. Call External BigK API to get Stripe session
         const session = await clientApi.getCheckoutSession(
             authHeader.split(' ')[1],
-            items
+            items,
+            shipping_address,
+            { total }
         );
 
         // 2. Log pending order locally

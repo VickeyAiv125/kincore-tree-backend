@@ -46,25 +46,74 @@ class ClientApiService {
 
     // --- Mall / Products Methods ---
 
-    async getProducts() {
+    async getProducts(query = {}, token = null) {
+        return this.getAppProducts(query, token);
+    }
+
+    async getAppProducts(query = {}, token = null) {
+        const headers = { Accept: 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const response = await axios.get(`${this.getPlenorHubBase()}/app/products`, {
+            params: query,
+            headers,
+            timeout: 15000
+        });
+        return response.data;
+    }
+
+    async getAppProductById(id, query = {}, token = null) {
+        const headers = { Accept: 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const response = await axios.get(`${this.getPlenorHubBase()}/app/products/${id}`, {
+            params: query,
+            headers,
+            timeout: 15000
+        });
+        return response.data;
+    }
+
+    async getCheckoutSession(token, items, shipping_address = null, extra = {}) {
         try {
-            const response = await this.api.get('/kmall/public/products');
-            return response.data; // Expected: Paginated list of products
+            const body = { items, ...extra };
+            if (shipping_address) {
+                const { normalizePlenorShippingAddress } = await import('../utils/plenorShippingAddress.js');
+                body.shipping_address = normalizePlenorShippingAddress(shipping_address);
+            }
+            const response = await axios.post(
+                `${this.getPlenorHubBase()}/checkout/create-session`,
+                body,
+                { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+            );
+            return response.data;
         } catch (err) {
-            console.error('Error fetching mall products:', err.message);
+            console.error('Error creating checkout session:', err.message);
             throw err;
         }
     }
 
-    async getCheckoutSession(token, items) {
+    async getShippingRates(token, { merchant_id, items, shipping_address }) {
+        const { normalizePlenorShippingAddress, assertPlenorShippingAddress } = await import('../utils/plenorShippingAddress.js');
+        const address = normalizePlenorShippingAddress(shipping_address || {});
+        const missing = assertPlenorShippingAddress(address);
+        if (missing.length) {
+            const error = new Error(`Missing ${missing.join(', ')}`);
+            error.status = 422;
+            error.missing = missing;
+            throw error;
+        }
         try {
-            const response = await this.api.post('/checkout/create-session', { items }, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            return response.data; // Expected: { session_id, url }
+            const response = await axios.post(
+                `${this.getPlenorHubBase()}/checkout/shipping-rates`,
+                { merchant_id, items, shipping_address: address },
+                { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } }
+            );
+            return response.data;
         } catch (err) {
-            console.error('Error creating checkout session:', err.message);
-            throw err;
+            const data = err.response?.data;
+            const wrapped = new Error(data?.message || data?.error || err.message);
+            wrapped.status = err.response?.status || 500;
+            wrapped.payload = data;
+            throw wrapped;
         }
     }
     // --- PlenorHub / BigK Admin & Mall Integration Methods ---
