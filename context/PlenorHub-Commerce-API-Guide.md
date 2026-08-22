@@ -644,25 +644,31 @@ These endpoints support card/fiat checkout through Stripe.
 
 * **POST** /checkout/shipping-rates
 
-Actual request body accepted today:
+Actual request body accepted today (live validator requires **name** and **zip**, not only recipient_name / postal_code). Send both names:
 
-{  
-  "merchant\_id": 77,  
-  "items": \[  
-    {"product\_id": 123, "quantity": 2}  
-  \],  
-  "shipping\_address": {  
-    "recipient\_name": "Jane Doe",  
-    "recipient\_phone": "+60123456789",  
-    "address": "123 Street",  
-    "city": "Kuala Lumpur",  
-    "state": "WP Kuala Lumpur",  
-    "postal\_code": "50000",  
-    "country": "MY"  
-  }  
+```json
+{
+  "merchant_id": 77,
+  "items": [
+    { "product_id": 123, "quantity": 2 }
+  ],
+  "shipping_address": {
+    "name": "Jane Doe",
+    "address": "123 Street",
+    "city": "Kuala Lumpur",
+    "state": "WP Kuala Lumpur",
+    "zip": "50000",
+    "recipient_name": "Jane Doe",
+    "recipient_phone": "+60123456789",
+    "postal_code": "50000",
+    "country": "MY"
+  }
 }
+```
 
-Client-side normalization may continue to use recipient\_name / recipient\_phone / postal\_code. This route currently validates name and zip.
+Required by live API: `shipping_address.name`, `address`, `city`, `state`, `zip`.
+
+Optional aliases: `recipient_name`, `recipient_phone`, `postal_code`.
 
 Shipping response values are returned in the buyer display/payment currency when conversion is needed.
 
