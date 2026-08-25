@@ -2,6 +2,13 @@ import { supabase } from '../../config/supabaseClient.js';
 import { logActivity } from '../../utils/logger.js';
 import { uploadFile, BUCKETS } from '../../config/storageClient.js';
 import { createNotification } from '../../shared/controllers/notificationController.js';
+import {
+    parsePostSettingsBody,
+    settingsFromPost,
+    canUserSeePost,
+    canUserCommentOnPost,
+    normalizeVisibility
+} from '../../utils/postSettings.js';
 import multer from 'multer';
 
 // Multer setup for post media uploads (images/videos)
@@ -19,7 +26,7 @@ export const upload = multer({
 /**
  * GET Feed — family posts + stories bar
  * PRD Section 13: chronological, no algorithmic ranking
- * Visibility: family | branch | public
+ * Visibility: public | friends | friends_except | specific_friends | family | branch
  */
 export const getPosts = async (req, res) => {
     try {
@@ -41,17 +48,27 @@ export const getPosts = async (req, res) => {
         if (visibility) {
             dbQuery = dbQuery.eq('visibility', visibility);
         } else {
-            dbQuery = dbQuery.in('visibility', ['family', 'public']);
+            dbQuery = dbQuery.in('visibility', [
+                'family',
+                'public',
+                'friends',
+                'friends_except',
+                'specific_friends',
+                'branch'
+            ]);
         }
 
-
-
+        // Over-fetch slightly so friends_except / specific_friends filtering still fills a page
+        const fetchLimit = parseInt(limit) * 3;
         const { data, error } = await dbQuery
             .order('created_at', { ascending: false })
-            .range(offset, offset + parseInt(limit) - 1);
+            .range(offset, offset + fetchLimit - 1);
 
         if (error) throw error;
-        res.json({ posts: data, page: parseInt(page), limit: parseInt(limit) });
+
+        const visible = (data || []).filter((post) => canUserSeePost(post, user.id));
+        const posts = visible.slice(0, parseInt(limit));
+        res.json({ posts, page: parseInt(page), limit: parseInt(limit) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -109,13 +126,15 @@ export const getReels = async (req, res) => {
  *   file[]         — optional, up to 5 images/videos (field name: 'media')
  *   content        — text body ("What's on your mind?")
  *   family_space_id
- *   visibility     — family | branch | public (default: family)
+ *   visibility     — public | friends | friends_except | specific_friends | family | branch
+ *   comment_permission — followers | friends | chosen_friends (default: friends)
+ *   visibility_except_ids / visibility_allowed_ids / comment_allowed_ids — JSON user ID arrays
  *   post_type      — text | media | event | milestone | product (default: text)
  *   tagged_users   — JSON array of user IDs e.g. ["uuid1","uuid2"]
  */
 export const createPost = async (req, res) => {
     try {
-        const { family_space_id, content, visibility, post_type, tagged_users } = req.body;
+        const { family_space_id, content, post_type, tagged_users } = req.body;
         const { user } = req;
 
         if (!family_space_id) return res.status(400).json({ error: 'family_space_id is required' });
@@ -124,6 +143,16 @@ export const createPost = async (req, res) => {
         if (!content && (!req.files || req.files.length === 0)) {
             return res.status(400).json({ error: 'Content or media is required to create a post.' });
         }
+
+        const settings = parsePostSettingsBody(req.body);
+        if (settings.errors.length) {
+            return res.status(400).json({ error: settings.errors.join('; ') });
+        }
+
+        const visibility = settings.visibility
+            || normalizeVisibility(req.body.visibility, 'family')
+            || 'family';
+        const comment_permission = settings.comment_permission || 'friends';
 
         // Upload media files to Supabase storage
         let media_urls = [];
@@ -166,7 +195,11 @@ export const createPost = async (req, res) => {
                 post_type: final_post_type,
                 media_urls: media_urls.length > 0 ? media_urls : null,
                 tagged_users: tags.length > 0 ? tags : null,
-                visibility: visibility || 'family'
+                visibility,
+                comment_permission,
+                visibility_except_ids: settings.visibility_except_ids,
+                visibility_allowed_ids: settings.visibility_allowed_ids,
+                comment_allowed_ids: settings.comment_allowed_ids
             })
             .select()
             .single();
@@ -183,6 +216,98 @@ export const createPost = async (req, res) => {
         ).catch(() => {});
 
         res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * GET /api/posts/:id/settings — who can see / who can comment
+ */
+export const getPostSettings = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { user } = req;
+
+        const { data: post, error } = await supabase
+            .from('posts')
+            .select('id, user_id, visibility, comment_permission, visibility_except_ids, visibility_allowed_ids, comment_allowed_ids')
+            .eq('id', id)
+            .is('deleted_at', null)
+            .maybeSingle();
+
+        if (error) throw error;
+        if (!post) return res.status(404).json({ error: 'Post not found' });
+        if (post.user_id !== user.id) return res.status(403).json({ error: 'Not your post' });
+
+        res.json(settingsFromPost(post));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * PUT /api/posts/:id/settings — update visibility + comment rules
+ */
+export const updatePostSettings = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { user } = req;
+
+        const { data: post, error: findErr } = await supabase
+            .from('posts')
+            .select('id, user_id, visibility, comment_permission, visibility_except_ids, visibility_allowed_ids, comment_allowed_ids')
+            .eq('id', id)
+            .is('deleted_at', null)
+            .maybeSingle();
+
+        if (findErr) throw findErr;
+        if (!post) return res.status(404).json({ error: 'Post not found' });
+        if (post.user_id !== user.id) return res.status(403).json({ error: 'Not your post' });
+
+        const settings = parsePostSettingsBody(req.body);
+        if (settings.errors.length) {
+            return res.status(400).json({ error: settings.errors.join('; ') });
+        }
+
+        const patch = {};
+        if (settings.visibility) patch.visibility = settings.visibility;
+        if (settings.comment_permission) patch.comment_permission = settings.comment_permission;
+        if (
+            req.body.visibility_except_ids != null
+            || req.body.friends_except_ids != null
+            || req.body.except_user_ids != null
+        ) {
+            patch.visibility_except_ids = settings.visibility_except_ids;
+        }
+        if (
+            req.body.visibility_allowed_ids != null
+            || req.body.specific_friends_ids != null
+            || req.body.allowed_user_ids != null
+        ) {
+            patch.visibility_allowed_ids = settings.visibility_allowed_ids;
+        }
+        if (
+            req.body.comment_allowed_ids != null
+            || req.body.chosen_friends_ids != null
+        ) {
+            patch.comment_allowed_ids = settings.comment_allowed_ids;
+        }
+
+        if (!Object.keys(patch).length) {
+            return res.status(400).json({ error: 'No settings fields provided' });
+        }
+
+        const { data, error } = await supabase
+            .from('posts')
+            .update(patch)
+            .eq('id', id)
+            .select('id, user_id, visibility, comment_permission, visibility_except_ids, visibility_allowed_ids, comment_allowed_ids')
+            .single();
+
+        if (error) throw error;
+        await logActivity(user.id, 'UPDATE_POST_SETTINGS', 'posts', id, post, data);
+        res.json(settingsFromPost(data));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -258,8 +383,30 @@ export const addReaction = async (req, res) => {
  */
 export const addComment = async (req, res) => {
     try {
-        const { post_id, content } = req.body;
+        const post_id = req.body.post_id || req.params.id;
+        const { content } = req.body;
         const { user } = req;
+
+        if (!post_id) return res.status(400).json({ error: 'post_id is required' });
+        if (!content || !String(content).trim()) {
+            return res.status(400).json({ error: 'content is required' });
+        }
+
+        const { data: post, error: postErr } = await supabase
+            .from('posts')
+            .select('id, user_id, visibility, comment_permission, visibility_except_ids, visibility_allowed_ids, comment_allowed_ids, deleted_at')
+            .eq('id', post_id)
+            .maybeSingle();
+
+        if (postErr) throw postErr;
+        if (!post || post.deleted_at) return res.status(404).json({ error: 'Post not found' });
+        if (!canUserSeePost(post, user.id)) {
+            return res.status(403).json({ error: 'You cannot view this post' });
+        }
+        if (!canUserCommentOnPost(post, user.id)) {
+            return res.status(403).json({ error: 'You cannot comment on this post' });
+        }
+
         const { data, error } = await supabase
             .from('comments')
             .insert({ post_id, user_id: user.id, content })
@@ -268,8 +415,7 @@ export const addComment = async (req, res) => {
         if (error) throw error;
 
         // ── TRIGGER NOTIFICATION (Except if commenting on own post) ──
-        const { data: post } = await supabase.from('posts').select('user_id').eq('id', post_id).single();
-        if (post && post.user_id !== user.id) {
+        if (post.user_id !== user.id) {
             const { data: sender } = await supabase.from('users').select('first_name').eq('id', user.id).single();
             await createNotification({
                 user_id: post.user_id,

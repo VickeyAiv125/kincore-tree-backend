@@ -11,6 +11,8 @@ import {
     getBookmarks,
     reportPost,
     getReels,
+    getPostSettings,
+    updatePostSettings,
     upload
 } from '../controllers/postController.js';
 import { authMiddleware } from '../../middleware/authMiddleware.js';
@@ -22,9 +24,14 @@ const router = express.Router();
 router.get('/', authMiddleware, getPosts);
 router.get('/reels', authMiddleware, getReels);
 
-// ── Create Post (multipart: content, family_space_id, visibility, tagged_users, up to 5 media files) ──
+// ── Create Post (multipart: content, family_space_id, visibility, comment_permission, tagged_users, up to 5 media files) ──
 // POST /api/posts
 router.post('/', authMiddleware, upload.array('media', 5), createPost);
+
+// ── Post Settings (who can see / who can comment) ──
+// GET/PUT /api/posts/:id/settings
+router.get('/:id/settings', authMiddleware, getPostSettings);
+router.put('/:id/settings', authMiddleware, updatePostSettings);
 
 // ── Delete Post ──
 router.delete('/:id', authMiddleware, deletePost);

@@ -313,7 +313,11 @@ CREATE TABLE IF NOT EXISTS public.posts (
     post_type VARCHAR(50) DEFAULT 'text',
     media_urls JSONB DEFAULT '[]'::jsonb,
     tagged_users JSONB DEFAULT '[]'::jsonb,
-    visibility VARCHAR(20) DEFAULT 'family',
+    visibility VARCHAR(40) DEFAULT 'family', -- public | friends | friends_except | specific_friends | family | branch
+    comment_permission VARCHAR(40) DEFAULT 'friends', -- followers | friends | chosen_friends
+    visibility_except_ids JSONB DEFAULT '[]'::jsonb,
+    visibility_allowed_ids JSONB DEFAULT '[]'::jsonb,
+    comment_allowed_ids JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()),
     deleted_at TIMESTAMPTZ
 );
