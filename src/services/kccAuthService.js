@@ -11,7 +11,7 @@ import { AuthService } from './authService.js';
 const trim = (v) => String(v || '').trim();
 
 export const getKccClientConfig = () => {
-    const baseUrl = trim(process.env.KCC_ID_BASE_URL || 'https://auth.bigkpay.com').replace(/\/$/, '');
+    const baseUrl = trim(process.env.KCC_ID_BASE_URL || 'https://uat-auth.bigkpay.com').replace(/\/$/, '');
     const clientId = trim(process.env.KCC_CLIENT_ID || 'kincore');
     return { baseUrl, clientId };
 };
@@ -19,7 +19,7 @@ export const getKccClientConfig = () => {
 /**
  * Login via KCC ID → ensure local user → mint Kincore session.
  */
-export const loginWithKccId = async ({ identifier, password }) => {
+export const loginWithKccId = async ({ identifier, password, skipLocalFallback = false }) => {
     const cleanId = trim(identifier);
     const cleanPass = String(password || '');
     if (!cleanId || !cleanPass) {
@@ -43,28 +43,31 @@ export const loginWithKccId = async ({ identifier, password }) => {
     if (!loginRes.ok) {
         // Local Kincore admins (auditor@admin.com, etc.) are not KCC ID users.
         // If ecosystem login fails, try the same email/password on Kincore.
-        try {
-            const local = await AuthService.login({ identifier: cleanId, password: cleanPass });
-            return {
-                ...local,
-                kcc: null,
-                login_via: 'kincore_local'
-            };
-        } catch {
-            const msg =
-                loginData.error_description
-                || loginData.message
-                || loginData.error
-                || 'KCC ID login failed';
-            const err = new Error(
-                typeof msg === 'string' && msg !== 'invalid_grant'
-                    ? msg
-                    : 'KCC ID did not accept these credentials. Use a KCC ID account, or sign in with Email / username for Kincore admin accounts such as auditor@admin.com.'
-            );
-            err.status = loginRes.status;
-            err.payload = loginData;
-            throw err;
+        if (!skipLocalFallback) {
+            try {
+                const local = await AuthService.login({ identifier: cleanId, password: cleanPass });
+                return {
+                    ...local,
+                    kcc: null,
+                    login_via: 'kincore_local'
+                };
+            } catch {
+                /* fall through to KCC error */
+            }
         }
+        const msg =
+            loginData.error_description
+            || loginData.message
+            || loginData.error
+            || 'KCC ID login failed';
+        const err = new Error(
+            typeof msg === 'string' && msg !== 'invalid_grant'
+                ? msg
+                : 'KCC ID did not accept these credentials. Use a KCC ID account, or sign in with Email / username for Kincore admin accounts such as auditor@admin.com.'
+        );
+        err.status = loginRes.status;
+        err.payload = loginData;
+        throw err;
     }
 
     // Wallet-style 2FA is usually skipped for client_id=kincore, but handle if returned
@@ -123,6 +126,19 @@ export const loginWithKccId = async ({ identifier, password }) => {
 
     await ensureUserFromSocialProfile(profile);
     const session = await createSessionForEmail(profile.email);
+
+    // Persist KCC handle so later /auth/login can resolve it without calling KCC.
+    if (profile.email && !cleanId.includes('@')) {
+        try {
+            const { supabase } = await import('../config/supabaseClient.js');
+            await supabase
+                .from('users')
+                .update({ wallet_handle: cleanId.toLowerCase() })
+                .ilike('email', profile.email);
+        } catch (e) {
+            console.warn('[KCC_LOGIN] wallet_handle sync skipped:', e.message);
+        }
+    }
 
     const result = await AuthService.oauthLogin({
         access_token: session.access_token,

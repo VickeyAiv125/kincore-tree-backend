@@ -15,7 +15,7 @@ export const getAppMembers = async (req, res) => {
         // Fetch all persons in the given family space
         const { data: persons, error: pError } = await supabase
             .from('persons')
-            .select('id, full_name, first_name, last_name, avatar_url, role, birth_date, death_date')
+            .select('id, full_name, first_name, last_name, avatar_url, role, birth_date, death_date, claimed_by')
             .eq('family_space_id', family_space_id);
 
         if (pError) throw pError;
@@ -71,11 +71,15 @@ export const getAppMembers = async (req, res) => {
 
             return {
                 id: person.id,
+                person_id: person.id,
                 full_name: person.full_name || `${person.first_name || ''} ${person.last_name || ''}`.trim(),
                 avatar_url: person.avatar_url,
                 relation_tag: relationTag.charAt(0).toUpperCase() + relationTag.slice(1),
                 years: years,
-                is_family: !isPeople
+                is_family: !isPeople,
+                claimed_by: person.claimed_by || null,
+                user_id: person.claimed_by || null,
+                is_claimed: Boolean(person.claimed_by)
             };
         });
 

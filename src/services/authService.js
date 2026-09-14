@@ -161,7 +161,20 @@ export const AuthService = {
             if (byHandle?.email) {
                 cleanEmail = byHandle.email.trim().toLowerCase();
             } else {
-                throw new Error('Use your email address, wallet handle, or sign in with Google, Facebook, or KCC.');
+                // Handle may be a KCCID (e.g. skker) not yet synced to users.wallet_handle.
+                const { loginWithKccId } = await import('./kccAuthService.js');
+                try {
+                    return await loginWithKccId({
+                        identifier: raw,
+                        password,
+                        skipLocalFallback: true,
+                    });
+                } catch (kccErr) {
+                    throw new Error(
+                        kccErr?.message
+                        || 'Use your email address, wallet handle, or sign in with Google, Facebook, or KCC.'
+                    );
+                }
             }
         }
 

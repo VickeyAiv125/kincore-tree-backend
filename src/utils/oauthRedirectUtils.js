@@ -25,6 +25,9 @@ export const getAllowedOAuthOrigins = () => {
     add(process.env.MOBILE_WEB_URL);
     add('http://localhost:5173');
     add('http://localhost:5000');
+    add('https://uat.kincore.com');
+    add('https://uat-app.kincore.com');
+    add('https://uat-admin.kincore.com');
 
     String(process.env.OAUTH_REDIRECT_ORIGINS || '')
         .split(',')

@@ -518,26 +518,42 @@ export const createFamilySpace = async (req, res) => {
  * User can then request to join that family space.
  *
  * Query params (all optional, at least 1 required):
- *   first_name, last_name, gender, dob (YYYY-MM-DD), year_only (true/false)
+ *   first_name, last_name, email, gender, dob (YYYY-MM-DD), year_only (true/false)
  */
 export const findYourself = async (req, res) => {
     try {
-        const { first_name, last_name, gender, dob, year_only } = req.query;
+        const { first_name, last_name, email, gender, dob, year_only } = req.query;
+        const userId = req.user?.id || null;
 
-        if (!first_name && !last_name && !gender && !dob) {
+        if (!first_name && !last_name && !email && !gender && !dob) {
             return res.status(400).json({ error: 'Enter at least one field to search.' });
         }
 
-        let query = supabase
-            .from('persons')
-            .select(`
+        const firstQ = first_name ? String(first_name).trim() : '';
+        const lastQ = last_name ? String(last_name).trim() : '';
+        const emailQ = email ? String(email).trim().toLowerCase() : '';
+
+        const personSelect = `
                 id,
                 full_name,
+                first_name,
+                last_name,
                 gender,
                 birth_date,
                 bio,
                 avatar_url,
                 privacy_mode,
+                claimed_by,
+                email,
+                family_space_id,
+                family_spaces (
+                    id,
+                    name,
+                    code,
+                    description,
+                    visibility,
+                    settings
+                ),
                 clan_trees (
                     id,
                     name,
@@ -546,52 +562,176 @@ export const findYourself = async (req, res) => {
                         id,
                         name,
                         code,
-                        description
+                        description,
+                        visibility,
+                        settings
                     )
                 )
-            `)
-            .neq('privacy_mode', 'private')   // only searchable persons
-            .is('claimed_by', null);           // only unclaimed (available to find)
+            `;
 
-        if (first_name) query = query.ilike('full_name', `%${first_name}%`);
-        if (last_name) query = query.ilike('full_name', `%${last_name}%`);
-        if (gender) query = query.eq('gender', gender.toLowerCase());
+        const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const initialsOf = (v) => {
+            const parts = norm(v).split(' ').filter(Boolean);
+            if (parts.length === 0) return '';
+            if (parts.length === 1 && parts[0].length <= 3) return parts[0];
+            return parts.map((p) => p[0]).join('');
+        };
+        const nameVariants = (q) => {
+            const n = norm(q);
+            if (!n) return [];
+            const parts = n.split(' ').filter(Boolean);
+            const out = new Set([n, n.replace(/[.\s_-]+/g, '')]);
+            if (parts.length >= 2) {
+                out.add(parts.map((p) => p[0]).join(''));
+                out.add(parts.map((p) => p[0]).join('.'));
+                out.add(parts[0]);
+            }
+            return [...out].filter(Boolean);
+        };
+        const matchesName = (person, query) => {
+            if (!query) return true;
+            const variants = nameVariants(query);
+            const first = norm(person.first_name);
+            const full = norm(person.full_name);
+            const firstInit = initialsOf(person.first_name);
+            const fullInit = initialsOf(person.full_name);
+            return variants.some((v) =>
+                first.includes(v)
+                || full.includes(v)
+                || firstInit === v
+                || fullInit === v
+                || v === first
+                || v === full
+            );
+        };
+
+        let query = supabase.from('persons').select(personSelect);
+
+        // Unclaimed searchable people, OR the logged-in user's own claimed profile(s)
+        if (userId) {
+            query = query.or(
+                `and(claimed_by.is.null,privacy_mode.neq.private),claimed_by.eq.${userId}`
+            );
+        } else {
+            query = query.is('claimed_by', null).neq('privacy_mode', 'private');
+        }
+
+        if (firstQ) {
+            const variants = nameVariants(firstQ);
+            const orParts = variants.flatMap((v) => [
+                `first_name.ilike.%${v}%`,
+                `full_name.ilike.%${v}%`,
+            ]);
+            query = query.or([...new Set(orParts)].join(','));
+        }
+        if (lastQ) {
+            query = query.or(
+                `last_name.ilike.%${lastQ}%,full_name.ilike.%${lastQ}%`
+            );
+        }
+        if (emailQ) {
+            query = query.ilike('email', `%${emailQ}%`);
+        }
+        if (gender) {
+            query = query.ilike('gender', String(gender).trim());
+        }
 
         if (dob) {
+            let iso = String(dob).trim();
+            const slash = iso.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (slash) {
+                iso = `${slash[3]}-${slash[2].padStart(2, '0')}-${slash[1].padStart(2, '0')}`;
+            }
             if (year_only === 'true') {
-                const year = new Date(dob).getFullYear();
-                query = query.gte('birth_date', `${year}-01-01`).lte('birth_date', `${year}-12-31`);
+                const year = new Date(iso).getFullYear();
+                if (!Number.isNaN(year)) {
+                    query = query.gte('birth_date', `${year}-01-01`).lte('birth_date', `${year}-12-31`);
+                }
             } else {
-                query = query.eq('birth_date', dob);
+                query = query.eq('birth_date', iso);
             }
         }
 
-        const { data, error } = await query.limit(20);
+        const { data, error } = await query.limit(60);
         if (error) throw error;
 
-        // Enforce family-level external search / global profile flags (batch)
-        const spaceIds = [...new Set(
-            (data || [])
-                .map((p) => p.clan_trees?.family_spaces?.id || p.clan_trees?.family_space_id)
-                .filter(Boolean)
-        )];
-        const privacyBySpace = {};
-        if (spaceIds.length) {
-            const { data: spaces } = await supabase
-                .from('family_spaces')
-                .select('id, settings, visibility')
-                .in('id', spaceIds);
-            for (const s of spaces || []) {
-                privacyBySpace[s.id] = parseFamilyPrivacy(s.settings, s.visibility);
+        const byId = new Map((data || []).map((p) => [p.id, p]));
+
+        // Email: also resolve users with that email → their claimed persons
+        if (emailQ) {
+            const { data: usersByEmail } = await supabase
+                .from('users')
+                .select('id, email')
+                .ilike('email', emailQ)
+                .limit(10);
+            const userIds = (usersByEmail || []).map((u) => u.id).filter(Boolean);
+            if (userIds.length) {
+                const { data: claimed } = await supabase
+                    .from('persons')
+                    .select(personSelect)
+                    .in('claimed_by', userIds)
+                    .limit(40);
+                for (const p of claimed || []) {
+                    if (p?.id) byId.set(p.id, p);
+                }
+            }
+            const { data: byPersonEmail } = await supabase
+                .from('persons')
+                .select(personSelect)
+                .ilike('email', `%${emailQ}%`)
+                .limit(40);
+            for (const p of byPersonEmail || []) {
+                if (p?.id) byId.set(p.id, p);
             }
         }
 
-        const results = (data || []).filter((person) => {
-            const sid = person.clan_trees?.family_spaces?.id || person.clan_trees?.family_space_id;
-            if (!sid) return true;
-            const privacy = privacyBySpace[sid];
-            if (!privacy) return true;
-            return familyAllowsExternalSearch(privacy);
+        const results = [...byId.values()].filter((person) => {
+            if (firstQ && !matchesName(person, firstQ)) return false;
+            if (lastQ) {
+                const lastOk = norm(person.last_name).includes(norm(lastQ))
+                    || norm(person.full_name).includes(norm(lastQ));
+                if (!lastOk) return false;
+            }
+            if (gender && norm(person.gender) !== norm(gender)) return false;
+
+            const isOwn = userId && String(person.claimed_by) === String(userId);
+            if (isOwn) return true;
+
+            // Already claimed by someone else — not claimable via Find Yourself
+            if (person.claimed_by) return false;
+            if (String(person.privacy_mode || '').toLowerCase() === 'private') return false;
+
+            if (emailQ) {
+                const personEmail = norm(person.email);
+                if (!personEmail.includes(emailQ)) return false;
+            }
+
+            const space = person.family_spaces
+                || person.clan_trees?.family_spaces
+                || null;
+            if (!space) return true;
+            const settings = space.settings && typeof space.settings === 'object' ? space.settings : {};
+            if (Object.prototype.hasOwnProperty.call(settings, 'externalSearchIndexing')
+                && settings.externalSearchIndexing === false
+                && !settings.globalProfileVisibility) {
+                return false;
+            }
+            return true;
+        }).slice(0, 20).map((person) => {
+            const isOwn = userId && String(person.claimed_by) === String(userId);
+            let out = person;
+            if (!person.clan_trees && person.family_spaces) {
+                out = {
+                    ...person,
+                    clan_trees: {
+                        id: null,
+                        name: person.family_spaces.name,
+                        family_space_id: person.family_spaces.id,
+                        family_spaces: person.family_spaces
+                    }
+                };
+            }
+            return { ...out, is_own_profile: !!isOwn };
         });
 
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -600,6 +740,7 @@ export const findYourself = async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 };
+
 
 
 const extractInviteCode = (linkOrCode) => {

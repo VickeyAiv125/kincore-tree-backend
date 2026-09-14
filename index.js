@@ -53,8 +53,57 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(helmet());
-app.use(cors());
+// Public API is called cross-origin from uat-app / admin. Helmet's default
+// Cross-Origin-Resource-Policy: same-origin makes browsers fail XHR/fetch as a
+// network error even when Access-Control-Allow-Origin is present.
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+const corsAllowedOrigins = new Set([
+    'https://uat-app.kincore.com',
+    'https://uat-admin.kincore.com',
+    'https://uat.kincore.com',
+    'http://localhost:5173',
+    'http://localhost:5000',
+    'http://localhost:3000',
+]);
+String(process.env.CORS_ORIGINS || process.env.OAUTH_REDIRECT_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .forEach((origin) => corsAllowedOrigins.add(origin.replace(/\/$/, '')));
+[process.env.FRONTEND_URL, process.env.APP_URL, process.env.MOBILE_WEB_URL]
+    .filter(Boolean)
+    .forEach((value) => {
+        try {
+            corsAllowedOrigins.add(new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).origin);
+        } catch {
+            /* ignore invalid env URL */
+        }
+    });
+
+app.use(cors({
+    origin(origin, callback) {
+        // Non-browser clients (curl, mobile) send no Origin.
+        if (!origin || corsAllowedOrigins.has(origin)) {
+            return callback(null, true);
+        }
+        // Reflect unknown origins in UAT so SPA experiments still work; tighten in prod if needed.
+        return callback(null, true);
+    },
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'Accept',
+        'x-family-space-id',
+        'X-Requested-With',
+        'x-request-id',
+    ],
+    optionsSuccessStatus: 204,
+    maxAge: 86400,
+}));
 app.use(morgan('dev'));
 app.use(express.json());
 
@@ -100,7 +149,7 @@ app.use('/api/app/privacy', appPrivacyRoutes);
 app.use('/api/app/profile', profileRoutes);
 app.use('/api/app/members', memberRoutes);
 app.use('/api/app/calculator', calculatorRoutes);
-app.use('/api/v1/app', plenorAppRoutes);
+app.use('/api/v1', plenorAppRoutes);
 
 app.get('/health', (req, res) => {
     res.json({ status: 'v3.1.foundation.active', timestamp: new Date().toISOString() });
