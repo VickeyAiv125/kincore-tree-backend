@@ -517,21 +517,29 @@ export const createFamilySpace = async (req, res) => {
  * Returns matching persons + the family space they belong to.
  * User can then request to join that family space.
  *
- * Query params (all optional, at least 1 required):
- *   first_name, last_name, email, gender, dob (YYYY-MM-DD), year_only (true/false)
+ * Query params:
+ *   first_name and/or email (at least one required), last_name, gender, dob (YYYY-MM-DD), year_only
  */
 export const findYourself = async (req, res) => {
     try {
         const { first_name, last_name, email, gender, dob, year_only } = req.query;
         const userId = req.user?.id || null;
 
-        if (!first_name && !last_name && !email && !gender && !dob) {
-            return res.status(400).json({ error: 'Enter at least one field to search.' });
-        }
-
         const firstQ = first_name ? String(first_name).trim() : '';
         const lastQ = last_name ? String(last_name).trim() : '';
         const emailQ = email ? String(email).trim().toLowerCase() : '';
+
+        if (!firstQ && !lastQ && !emailQ && !gender && !dob) {
+            return res.status(400).json({ error: 'Enter at least one field to search.' });
+        }
+
+        // Require first name OR email so last-name-only searches cannot return unrelated relatives,
+        // while still allowing email lookup for claimed/registered profiles.
+        if (!firstQ && !emailQ) {
+            return res.status(400).json({
+                error: 'Enter first name or email to search.',
+            });
+        }
 
         const personSelect = `
                 id,
@@ -570,6 +578,7 @@ export const findYourself = async (req, res) => {
             `;
 
         const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const compact = (v) => norm(v).replace(/[.\s_-]+/g, '');
         const initialsOf = (v) => {
             const parts = norm(v).split(' ').filter(Boolean);
             if (parts.length === 0) return '';
@@ -580,29 +589,63 @@ export const findYourself = async (req, res) => {
             const n = norm(q);
             if (!n) return [];
             const parts = n.split(' ').filter(Boolean);
-            const out = new Set([n, n.replace(/[.\s_-]+/g, '')]);
+            const out = new Set([n, compact(n)]);
             if (parts.length >= 2) {
                 out.add(parts.map((p) => p[0]).join(''));
                 out.add(parts.map((p) => p[0]).join('.'));
+                // Keep first token only as a weak SQL candidate; post-filter is stricter.
                 out.add(parts[0]);
             }
             return [...out].filter(Boolean);
         };
-        const matchesName = (person, query) => {
+        /** Strict first-name match: given name / initials / full-name prefix — not last-name-only. */
+        const matchesFirstName = (person, query) => {
             if (!query) return true;
-            const variants = nameVariants(query);
+            const qNorm = norm(query);
+            const qCompact = compact(query);
+            const qInit = initialsOf(query);
             const first = norm(person.first_name);
             const full = norm(person.full_name);
+            const last = norm(person.last_name);
             const firstInit = initialsOf(person.first_name);
             const fullInit = initialsOf(person.full_name);
-            return variants.some((v) =>
-                first.includes(v)
-                || full.includes(v)
-                || firstInit === v
-                || fullInit === v
-                || v === first
-                || v === full
-            );
+            const fullWithoutLast = last && full.endsWith(last)
+                ? norm(full.slice(0, full.length - last.length))
+                : full;
+
+            if (!first && !full) return false;
+
+            // Exact / contains on first_name
+            if (first && (first === qNorm || first.includes(qNorm) || qNorm.includes(first))) return true;
+            if (first && (compact(first) === qCompact || firstInit === qInit || firstInit === qCompact)) return true;
+
+            // Initials: "Soon Kiat" ↔ "SK"
+            if (qInit && (firstInit === qInit || fullInit === qInit || first === qInit || compact(first) === qInit)) {
+                return true;
+            }
+            if (qCompact && (firstInit === qCompact || fullInit === qCompact || compact(first) === qCompact)) {
+                return true;
+            }
+
+            // Full name given-name portion (exclude trailing last name)
+            if (fullWithoutLast && (
+                fullWithoutLast === qNorm
+                || fullWithoutLast.includes(qNorm)
+                || qNorm.includes(fullWithoutLast)
+                || compact(fullWithoutLast) === qCompact
+                || initialsOf(fullWithoutLast) === qInit
+            )) {
+                return true;
+            }
+
+            return false;
+        };
+        const matchesLastName = (person, query) => {
+            if (!query) return true;
+            const q = norm(query);
+            const last = norm(person.last_name);
+            const full = norm(person.full_name);
+            return (last && last.includes(q)) || (full && full.split(/\s+/).pop() === q) || (full && full.endsWith(q));
         };
 
         let query = supabase.from('persons').select(personSelect);
@@ -617,16 +660,21 @@ export const findYourself = async (req, res) => {
         }
 
         if (firstQ) {
+            // Keep SQL broad (initials / tokens); enforce accuracy in matchesFirstName below.
             const variants = nameVariants(firstQ);
-            const orParts = variants.flatMap((v) => [
-                `first_name.ilike.%${v}%`,
-                `full_name.ilike.%${v}%`,
-            ]);
+            const orParts = variants.flatMap((v) => {
+                const safe = String(v).replace(/[,()]/g, '');
+                return [
+                    `first_name.ilike.%${safe}%`,
+                    `full_name.ilike.%${safe}%`,
+                ];
+            });
             query = query.or([...new Set(orParts)].join(','));
         }
         if (lastQ) {
+            const safeLast = lastQ.replace(/[,()]/g, '');
             query = query.or(
-                `last_name.ilike.%${lastQ}%,full_name.ilike.%${lastQ}%`
+                `last_name.ilike.%${safeLast}%,full_name.ilike.%${safeLast}%`
             );
         }
         if (emailQ) {
@@ -686,25 +734,26 @@ export const findYourself = async (req, res) => {
         }
 
         const results = [...byId.values()].filter((person) => {
-            if (firstQ && !matchesName(person, firstQ)) return false;
-            if (lastQ) {
-                const lastOk = norm(person.last_name).includes(norm(lastQ))
-                    || norm(person.full_name).includes(norm(lastQ));
-                if (!lastOk) return false;
-            }
+            const personEmail = norm(person.email);
+            const emailMatched = Boolean(emailQ && personEmail && personEmail.includes(emailQ));
+
+            // Name match when first name provided; email-only searches skip name filter.
+            if (firstQ && !matchesFirstName(person, firstQ)) return false;
+            if (lastQ && !matchesLastName(person, lastQ)) return false;
             if (gender && norm(person.gender) !== norm(gender)) return false;
 
             const isOwn = userId && String(person.claimed_by) === String(userId);
             if (isOwn) return true;
 
+            // Exact/partial email hit: allow discovery even if already claimed
+            // (Find Yourself needs to surface the matching profile by email).
+            if (emailMatched) return true;
+
             // Already claimed by someone else — not claimable via Find Yourself
             if (person.claimed_by) return false;
             if (String(person.privacy_mode || '').toLowerCase() === 'private') return false;
 
-            if (emailQ) {
-                const personEmail = norm(person.email);
-                if (!personEmail.includes(emailQ)) return false;
-            }
+            if (emailQ && !emailMatched) return false;
 
             const space = person.family_spaces
                 || person.clan_trees?.family_spaces
@@ -817,7 +866,7 @@ const buildInvitePayload = async (code, familySpaceId, name = null) => {
 
 /**
  * Public preview for an invite code (no auth). Used by mobile/landing before join form.
- * GET /api/families/join-info?code=DEMO-CHEN
+ * GET /api/families/join-info?code=DEMO-CHEN&email=&first_name=&last_name=&person_id=
  */
 export const getJoinInfo = async (req, res) => {
     try {
@@ -833,8 +882,69 @@ export const getJoinInfo = async (req, res) => {
         }
 
         const payload = await buildInvitePayload(space.code, space.id, space.name);
+
+        const emailQ = String(req.query.email || '').trim().toLowerCase();
+        const personIdQ = String(req.query.person_id || '').trim();
+        const firstNameQ = String(req.query.first_name || '').trim();
+        const lastNameQ = String(req.query.last_name || '').trim();
+
+        let invitee = {
+            first_name: firstNameQ || null,
+            last_name: lastNameQ || null,
+            email: emailQ || null,
+            person_id: personIdQ || null,
+        };
+
+        if (personIdQ || emailQ) {
+            let personQuery = supabase
+                .from('persons')
+                .select('id, first_name, last_name, email, full_name')
+                .eq('family_space_id', space.id)
+                .limit(1);
+            if (personIdQ) {
+                personQuery = personQuery.eq('id', personIdQ);
+            } else {
+                personQuery = personQuery.ilike('email', emailQ);
+            }
+            const { data: persons } = await personQuery;
+            const person = Array.isArray(persons) ? persons[0] : persons;
+            if (person) {
+                invitee = {
+                    first_name: person.first_name || invitee.first_name,
+                    last_name: person.last_name || invitee.last_name,
+                    email: (person.email || invitee.email || '').toLowerCase() || null,
+                    person_id: person.id,
+                };
+            }
+        }
+
+        let existing_user = false;
+        let already_member = false;
+        if (invitee.email) {
+            const { data: userRow } = await supabase
+                .from('users')
+                .select('id')
+                .ilike('email', invitee.email)
+                .maybeSingle();
+            existing_user = Boolean(userRow?.id);
+            if (userRow?.id) {
+                const { data: membership } = await supabase
+                    .from('family_memberships')
+                    .select('id')
+                    .eq('user_id', userRow.id)
+                    .eq('family_space_id', space.id)
+                    .maybeSingle();
+                already_member = Boolean(membership?.id);
+            }
+        }
+
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        res.json(payload);
+        res.json({
+            ...payload,
+            invitee,
+            existing_user,
+            already_member,
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -889,6 +999,7 @@ export const joinFamilyPublic = async (req, res) => {
                 first_name,
                 last_name,
                 date_of_birth: date_of_birth || null,
+                auto_verify: true,
             });
             isNewUser = true;
         } catch (signupErr) {

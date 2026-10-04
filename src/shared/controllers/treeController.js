@@ -23,15 +23,24 @@ const parseDobValue = (raw) => {
 const assertParentChildDob = ({ role, newDobRaw, targetPerson }) => {
     const newDob = parseDobValue(newDobRaw);
     if (!newDob) return;
+
+    const today = new Date();
+    const endOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59);
+    if (newDob.getTime() > endOfToday) {
+        const err = new Error('Date of birth cannot be in the future.');
+        err.status = 400;
+        throw err;
+    }
+
     const targetDob = parseDobValue(targetPerson?.date_of_birth || targetPerson?.birth_date);
     if (!targetDob) return;
     if (role === 'parent' && newDob.getTime() >= targetDob.getTime()) {
-        const err = new Error('Parent date of birth must be earlier than this person’s date of birth.');
+        const err = new Error("Parent's date of birth must be earlier than Self's date of birth.");
         err.status = 400;
         throw err;
     }
     if (role === 'child' && newDob.getTime() <= targetDob.getTime()) {
-        const err = new Error('Child date of birth must be later than this person’s date of birth.');
+        const err = new Error("Child's date of birth must be later than Self's date of birth.");
         err.status = 400;
         throw err;
     }
@@ -125,7 +134,7 @@ async function handleAdminControlledPending(user, familyRole, family_space_id, r
 async function getTargetPerson(targetPersonId, familySpaceId) {
     const { data, error } = await supabase
         .from('persons')
-        .select('id, family_space_id, clan_tree_id')
+        .select('id, family_space_id, clan_tree_id, date_of_birth, birth_date, first_name, last_name, full_name')
         .eq('id', targetPersonId)
         .eq('family_space_id', familySpaceId)
         .maybeSingle();
@@ -178,38 +187,27 @@ async function notifyTreeMemberAddedByEmail({
             process.env.MOBILE_WEB_URL
             || 'https://uat-app.kincore.com'
         ).replace(/\/$/, '');
+        const inviteQs = new URLSearchParams({ code: inviteCode || '' });
+        if (clean) inviteQs.set('email', clean);
+        if (firstName) inviteQs.set('first_name', String(firstName).trim());
+        if (lastName) inviteQs.set('last_name', String(lastName).trim());
+        if (personId) inviteQs.set('person_id', String(personId));
         const joinUrl = inviteCode
-            ? `${webBase}/join.html?code=${encodeURIComponent(inviteCode)}`
+            ? `${webBase}/join.html?${inviteQs.toString()}`
             : `${webBase}/join.html`;
         const displayName = `${firstName || ''} ${lastName || ''}`.trim() || 'there';
 
         const subject = `You've been added to ${familyName} on Kincore`;
-        const text = [
-            `Hi ${displayName},`,
-            '',
-            `You were added as a ${relationshipLabel} on the ${familyName} family tree in Kincore.`,
-            '',
-            `Open your invite: ${joinUrl}`,
-            `Or open the app: ${appBase}`,
-            '',
-            'If you already have a Kincore account, sign in and use Find Yourself / Join to claim your profile.',
-            '',
-            '— Kincore',
-        ].join('\n');
-        const html = `
-            <div style="font-family:Arial,sans-serif;line-height:1.5;color:#1f1d2b">
-              <p>Hi ${displayName},</p>
-              <p>You were added as a <strong>${relationshipLabel}</strong> on the
-              <strong>${familyName}</strong> family tree in Kincore.</p>
-              <p>
-                <a href="${joinUrl}" style="display:inline-block;background:#FF6A2B;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:700">
-                  Open invite
-                </a>
-              </p>
-              <p style="color:#6f6a78;font-size:13px">Or open the app: <a href="${appBase}">${appBase}</a></p>
-              <p style="color:#6f6a78;font-size:13px">If you already have an account, sign in and claim your profile from Find Yourself.</p>
-            </div>
-        `;
+        const { renderTreeInviteEmail } = await import('../../services/emailTemplateService.js');
+        const inviteRendered = await renderTreeInviteEmail({
+            displayName,
+            familyName,
+            relationshipLabel,
+            joinUrl,
+            appBase
+        });
+        const html = inviteRendered.html;
+        const text = inviteRendered.text;
 
         const mailResult = await sendEmail({ to: clean, subject, html, text });
 
@@ -938,12 +936,20 @@ export const getTreeData = async (req, res) => {
             .eq('clan_tree_id', allTreeIds[0] || null); // Primary tree search
         
         // Fallback: If no tree ID, search by person IDs in space
-        const { data: relsByPerson } = await supabase
-            .from('person_relations')
-            .select('*')
-            .or(`person_id_1.in.(${allPersonIds.join(',')}),person_id_2.in.(${allPersonIds.join(',')})`);
+        let relsByPerson = [];
+        if (allPersonIds.length > 0) {
+            const { data: relsByPersonRows, error: relsByPersonErr } = await supabase
+                .from('person_relations')
+                .select('*')
+                .or(`person_id_1.in.(${allPersonIds.join(',')}),person_id_2.in.(${allPersonIds.join(',')})`);
+            if (relsByPersonErr) {
+                console.warn('[getTreeData] person_relations by person id failed:', relsByPersonErr.message);
+            } else {
+                relsByPerson = relsByPersonRows || [];
+            }
+        }
 
-        const combinedRels = [...(rels || []), ...(relsByPerson || [])];
+        const combinedRels = [...(rels || []), ...relsByPerson];
         const relIdsSeen = new Set();
         
         normalizedRelations = combinedRels.filter(r => {
@@ -1014,7 +1020,12 @@ export const getTreeData = async (req, res) => {
                     return; // Skip redaction
                 }
 
-                if (p.date_of_birth) p.date_of_birth = p.date_of_birth.substring(0, 4) + '-01-01'; // Keep only year, fake M/D for standard parsing
+                if (p.date_of_birth != null && p.date_of_birth !== '') {
+                    const dobStr = String(p.date_of_birth);
+                    p.date_of_birth = dobStr.length >= 4
+                        ? `${dobStr.substring(0, 4)}-01-01`
+                        : dobStr;
+                }
                 if (p.latitude) p.latitude = null;
                 if (p.longitude) p.longitude = null;
                 if (p.current_location) p.current_location = '[REDACTED]';
@@ -1149,7 +1160,9 @@ export const getTreeWebviewUrl = async (req, res) => {
         const frontendBase = String(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
         const params = new URLSearchParams({
             view: 'app',
-            token: bearerToken
+            token: bearerToken,
+            // Bust SPA/iframe caches whenever tree is opened in the app
+            _v: String(Date.now()),
         });
         const url = `${frontendBase}/family-tree/webview/${familySpaceId}?${params.toString()}`;
 

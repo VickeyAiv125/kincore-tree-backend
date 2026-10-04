@@ -1,4 +1,9 @@
+import crypto from 'crypto';
 import { supabase } from '../config/supabaseClient.js';
+import { sendEmail } from './emailService.js';
+
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_DIGITS = 6;
 
 const normalizeRole = (roleStr) => {
     if (!roleStr) return null;
@@ -26,6 +31,170 @@ const DEFAULT_ADMINS = {
 };
 
 const PERSON_CREATING_ROLES = new Set(['owner', 'admin', 'family-admin', 'co-admin']);
+
+const generateSignupOtp = () => {
+    const max = 10 ** OTP_DIGITS;
+    const min = 10 ** (OTP_DIGITS - 1);
+    return String(crypto.randomInt(min, max));
+};
+
+const otpExpiryIso = () => new Date(Date.now() + OTP_TTL_MS).toISOString();
+
+/** Cached probe: true once users.is_verified / otp columns exist on this DB. */
+let usersOtpColumns = null;
+
+async function usersHaveOtpColumns() {
+    if (usersOtpColumns === true) return true;
+    const { error } = await supabase.from('users').select('is_verified').limit(1);
+    usersOtpColumns = !error;
+    if (!usersOtpColumns) {
+        console.warn('[AUTH_OTP] users OTP columns missing — using auth user_metadata fallback until migration is applied');
+    }
+    return usersOtpColumns;
+}
+
+async function findAuthUserByEmail(cleanEmail) {
+    try {
+        if (typeof supabase.auth.admin.getUserByEmail === 'function') {
+            const { data: byEmail } = await supabase.auth.admin.getUserByEmail(cleanEmail);
+            if (byEmail?.user) return byEmail.user;
+        }
+    } catch {
+        // fall through
+    }
+    for (let page = 1; page <= 10; page += 1) {
+        const { data: listed } = await supabase.auth.admin.listUsers({ page, perPage: 200 });
+        const match = (listed?.users || []).find(
+            (u) => String(u.email || '').toLowerCase() === cleanEmail
+        );
+        if (match) return match;
+        if (!(listed?.users || []).length || listed.users.length < 200) break;
+    }
+    return null;
+}
+
+async function writeSignupOtpState({
+    userId,
+    cleanEmail,
+    firstName,
+    lastName,
+    date_of_birth,
+    auto_verify,
+    otp,
+    otpExpiresAt
+}) {
+    const useCols = await usersHaveOtpColumns();
+    const userRow = {
+        id: userId,
+        email: cleanEmail,
+        first_name: firstName,
+        last_name: lastName,
+        date_of_birth: date_of_birth || null,
+        status: 'active',
+        updated_at: new Date().toISOString()
+    };
+    if (useCols) {
+        userRow.is_verified = !!auto_verify;
+        userRow.otp = auto_verify ? null : otp;
+        userRow.otp_expires_at = auto_verify ? null : otpExpiresAt;
+    }
+
+    const { error: upsertError } = await supabase.from('users').upsert(userRow, { onConflict: 'id' });
+    if (upsertError) throw upsertError;
+
+    const { data: existingAuth } = await supabase.auth.admin.getUserById(userId);
+    const prevMeta = existingAuth?.user?.user_metadata || {};
+
+    const { error: metaErr } = await supabase.auth.admin.updateUserById(userId, {
+        email_confirm: !!auto_verify,
+        user_metadata: {
+            ...prevMeta,
+            first_name: firstName || prevMeta.first_name || '',
+            last_name: lastName || prevMeta.last_name || '',
+            date_of_birth: date_of_birth ?? prevMeta.date_of_birth ?? null,
+            kincore_verified: !!auto_verify,
+            kincore_otp: auto_verify ? null : otp,
+            kincore_otp_expires_at: auto_verify ? null : otpExpiresAt
+        }
+    });
+    if (metaErr) throw metaErr;
+}
+
+async function readSignupOtpState(cleanEmail) {
+    const useCols = await usersHaveOtpColumns();
+    const select = useCols
+        ? 'id, email, first_name, last_name, otp, otp_expires_at, is_verified, status'
+        : 'id, email, first_name, last_name, status';
+
+    const { data: userRow, error: userErr } = await supabase
+        .from('users')
+        .select(select)
+        .ilike('email', cleanEmail)
+        .maybeSingle();
+    if (userErr) throw userErr;
+    if (!userRow) return null;
+
+    const authUser = await findAuthUserByEmail(cleanEmail);
+    const meta = authUser?.user_metadata || {};
+
+    const isVerified = useCols
+        ? userRow.is_verified === true
+        : meta.kincore_verified === true;
+
+    const otp = useCols ? userRow.otp : meta.kincore_otp;
+    const otpExpiresAt = useCols ? userRow.otp_expires_at : meta.kincore_otp_expires_at;
+
+    return {
+        userRow,
+        authUser,
+        isVerified,
+        otp: otp != null ? String(otp) : null,
+        otpExpiresAt,
+        useCols
+    };
+}
+
+async function clearSignupOtpState({ userId, userRow, useCols }) {
+    if (useCols) {
+        const { error } = await supabase
+            .from('users')
+            .update({
+                is_verified: true,
+                otp: null,
+                otp_expires_at: null,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', userId);
+        if (error) throw error;
+    }
+
+    await supabase.auth.admin.updateUserById(userId, {
+        email_confirm: true,
+        user_metadata: {
+            ...(userRow ? {
+                first_name: userRow.first_name,
+                last_name: userRow.last_name
+            } : {}),
+            kincore_verified: true,
+            kincore_otp: null,
+            kincore_otp_expires_at: null
+        }
+    });
+}
+
+const sendSignupOtpEmail = async ({ to, otp, firstName }) => {
+    const { renderOtpEmail } = await import('./emailTemplateService.js');
+    const subject = 'Your Kincore verification code';
+    const { html, text } = await renderOtpEmail({ otp, firstName });
+    const result = await sendEmail({ to, subject, html, text });
+    if (!result.ok) {
+        throw new Error(result.error || 'Failed to send OTP email');
+    }
+    if (result.mocked) {
+        console.log(`[AUTH_OTP] Mock OTP for ${to}: ${otp}`);
+    }
+    return result;
+};
 
 /**
  * Resolve the authenticated user's Person node in the selected family.
@@ -99,49 +268,256 @@ const resolvePrimaryPerson = async ({ userId, email, matchingIds, primarySpace, 
     return rootPerson.id;
 };
 
+/**
+ * Shared auth payload (token + enriched user) used by login and OTP verify.
+ */
+const buildLoginResult = async ({ userId, cleanEmail, authUser, accessToken }) => {
+    await AuthService.completeInvite({ id: userId, email: cleanEmail }).catch(e =>
+        console.warn('Auto completeInvite note:', e.message)
+    );
+
+    let { data: adminRecord } = await supabase
+        .from('admin_users')
+        .select('role')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (DEFAULT_ADMINS[cleanEmail]) {
+        console.log(`>>> [AUTH_LOGIN] System Admin Override: ${cleanEmail} -> ${DEFAULT_ADMINS[cleanEmail]}`);
+        adminRecord = { role: DEFAULT_ADMINS[cleanEmail] };
+    }
+
+    const { data: emailUsers } = await supabase.from('users').select('id').ilike('email', cleanEmail);
+    const matchingIds = [...new Set([userId, ...(emailUsers || []).map(u => u.id)])];
+
+    const [staffRes, memRes, personBranchRes, branchAdminRes] = await Promise.all([
+        supabase
+            .from('family_space_staff')
+            .select('family_space_id, role, family:family_spaces(name, visibility)')
+            .in('user_id', matchingIds)
+            .eq('is_active', true),
+        supabase
+            .from('family_memberships')
+            .select('family_space_id, role, branch_id, family:family_spaces(name, visibility)')
+            .in('user_id', matchingIds),
+        supabase
+            .from('persons')
+            .select('family_space_id, branch_id')
+            .or(`claimed_by.in.(${matchingIds.join(',')}),email.ilike.${cleanEmail}`),
+        supabase
+            .from('family_branches')
+            .select('id, family_space_id')
+            .in('branch_admin_id', matchingIds)
+    ]);
+
+    const spacesMap = new Map();
+
+    (memRes.data || []).forEach(m => {
+        spacesMap.set(m.family_space_id, {
+            id: m.family_space_id,
+            name: m.family?.name || 'Unknown Family',
+            role: normalizeRole(m.role) || 'member',
+            branch_id: m.branch_id || null
+        });
+    });
+
+    (staffRes.data || []).forEach(s => {
+        const existing = spacesMap.get(s.family_space_id) || {};
+        spacesMap.set(s.family_space_id, {
+            id: s.family_space_id,
+            name: s.family?.name || 'Unknown Family',
+            role: normalizeRole(s.role) || 'staff',
+            branch_id: existing.branch_id || null
+        });
+    });
+
+    const allSpaces = Array.from(spacesMap.values());
+
+    let primarySpace = null;
+    if (allSpaces.length > 0) {
+        const roleWeights = {
+            'owner': 5,
+            'admin': 4,
+            'family-admin': 4,
+            'co-admin': 3.8,
+            'branch-admin': 3.5,
+            'council': 3.5,
+            'manager': 3,
+            'editor': 2,
+            'staff': 1.5,
+            'member': 1
+        };
+
+        primarySpace = allSpaces.sort((a, b) => {
+            const weightA = roleWeights[a.role] || 0;
+            const weightB = roleWeights[b.role] || 0;
+            return weightB - weightA;
+        })[0];
+    }
+
+    await supabase
+        .from('users')
+        .update({ last_login_at: new Date().toISOString() })
+        .eq('id', userId);
+
+    if (!primarySpace && adminRecord && ['platform-admin', 'super_admin', 'business-admin'].includes(adminRecord.role)) {
+        const { data: firstSpace } = await supabase.from('family_spaces').select('id, name').limit(1).maybeSingle();
+        if (firstSpace) {
+            primarySpace = { id: firstSpace.id, name: firstSpace.name, role: normalizeRole(adminRecord.role) };
+        }
+    }
+
+    const resolvedRole = DEFAULT_ADMINS[cleanEmail]
+        || (adminRecord && ['platform-admin', 'superadmin', 'super_admin'].includes(adminRecord.role) ? adminRecord.role : null)
+        || normalizeRole(primarySpace?.role)
+        || normalizeRole(adminRecord?.role)
+        || 'member';
+
+    const resolvedBranchId = primarySpace?.branch_id
+        || branchAdminRes?.data?.[0]?.id
+        || personBranchRes?.data?.find(p => p.branch_id)?.branch_id
+        || null;
+
+    const personId = await resolvePrimaryPerson({
+        userId,
+        email: cleanEmail,
+        matchingIds,
+        primarySpace,
+        profile: authUser
+    });
+
+    return {
+        token: accessToken,
+        user: {
+            ...authUser,
+            role: resolvedRole,
+            family_id: primarySpace?.id || null,
+            family_name: primarySpace?.name || null,
+            person_id: personId,
+            target_person_id: personId,
+            spaces: allSpaces,
+            branch_id: cleanEmail === 'branch@admin.com'
+                ? '6b8eb992-571f-4637-b031-a56007560cad'
+                : resolvedBranchId,
+            is_verified: true
+        }
+    };
+};
+
 export const AuthService = {
-    async signup({ email, password, first_name, last_name, date_of_birth }) {
+    async signup({ email, password, first_name, last_name, date_of_birth, auto_verify = false }) {
         if (!email || !password) {
             throw new Error('Email and password are required');
         }
 
         const cleanEmail = email.trim().toLowerCase().replace(/[“”"']/g, '');
+        const firstName = first_name || '';
+        const lastName = last_name || '';
+        const useCols = await usersHaveOtpColumns();
 
-        const { data, error } = await supabase.auth.signUp({
-            email: cleanEmail,
-            password,
-            options: {
-                data: {
-                    first_name: first_name || '',
-                    last_name: last_name || '',
-                    date_of_birth: date_of_birth || null
+        const { data: existingLocal } = await supabase
+            .from('users')
+            .select(useCols ? 'id, is_verified, email' : 'id, email')
+            .ilike('email', cleanEmail)
+            .maybeSingle();
+
+        if (existingLocal) {
+            let alreadyVerified = false;
+            if (useCols) {
+                alreadyVerified = existingLocal.is_verified === true;
+            } else {
+                const authExisting = await findAuthUserByEmail(cleanEmail);
+                const meta = authExisting?.user_metadata || {};
+                if (meta.kincore_verified === true) {
+                    alreadyVerified = true;
+                } else if (meta.kincore_otp || meta.kincore_verified === false) {
+                    alreadyVerified = false; // pending OTP — allow refresh
+                } else {
+                    alreadyVerified = true; // legacy account
                 }
             }
-        });
+            if (alreadyVerified) {
+                throw new Error('An account with this email already exists. Please sign in.');
+            }
+        }
 
-        if (error) throw error;
+        let userId = existingLocal?.id || null;
 
-        const userId = data.user.id;
+        if (!userId) {
+            const { data: created, error: createError } = await supabase.auth.admin.createUser({
+                email: cleanEmail,
+                password,
+                email_confirm: !!auto_verify,
+                user_metadata: {
+                    first_name: firstName,
+                    last_name: lastName,
+                    date_of_birth: date_of_birth || null
+                }
+            });
 
-        // Sync to local users table
-        await supabase.from('users').insert({
-            id: userId,
-            email: cleanEmail,
-            first_name: first_name || '',
-            last_name: last_name || '',
-            date_of_birth: date_of_birth || null,
-            status: 'active'
+            if (createError) {
+                const msg = String(createError.message || '').toLowerCase();
+                if (msg.includes('already') || msg.includes('registered') || msg.includes('exists')) {
+                    const match = await findAuthUserByEmail(cleanEmail);
+                    if (!match) throw createError;
+                    userId = match.id;
+                    const { error: updErr } = await supabase.auth.admin.updateUserById(userId, {
+                        password,
+                        email_confirm: !!auto_verify
+                    });
+                    if (updErr) throw updErr;
+                } else {
+                    throw createError;
+                }
+            } else {
+                userId = created.user.id;
+            }
+        } else {
+            const { error: updErr } = await supabase.auth.admin.updateUserById(userId, {
+                password,
+                email_confirm: !!auto_verify
+            });
+            if (updErr) throw updErr;
+        }
+
+        const otp = auto_verify ? null : generateSignupOtp();
+        const otpExpiresAt = auto_verify ? null : otpExpiryIso();
+
+        await writeSignupOtpState({
+            userId,
+            cleanEmail,
+            firstName,
+            lastName,
+            date_of_birth,
+            auto_verify,
+            otp,
+            otpExpiresAt
         });
 
         const assignedRole = DEFAULT_ADMINS[cleanEmail];
         if (assignedRole) {
-            await supabase.from('admin_users').insert({
+            await supabase.from('admin_users').upsert({
                 user_id: userId,
                 role: assignedRole
-            });
+            }, { onConflict: 'user_id' });
         }
 
-        return { user: data.user, assignedRole, requires_email_confirmation: !data.session };
+        if (auto_verify) {
+            return {
+                message: 'User registered successfully',
+                user: { id: userId, email: cleanEmail, first_name: firstName, last_name: lastName },
+                assignedRole,
+                requires_email_confirmation: false,
+                otp_required: false
+            };
+        }
+
+        await sendSignupOtpEmail({ to: cleanEmail, otp, firstName });
+
+        return {
+            message: 'OTP sent successfully to email',
+            otp_required: true
+        };
     },
 
     async login({ email, password, identifier }) {
@@ -183,155 +559,39 @@ export const AuthService = {
         if (error) throw error;
 
         const userId = data.user.id;
+        const useCols = await usersHaveOtpColumns();
 
-        // Check if user is suspended
         const { data: userRecord } = await supabase
             .from('users')
-            .select('status')
+            .select(useCols ? 'status, is_verified' : 'status')
             .eq('id', userId)
             .single();
-            
+
         if (userRecord?.status === 'suspended') {
             await supabase.auth.signOut();
             throw new Error('Your account has been suspended. Please contact support.');
         }
 
-        // Auto-link any pending invitations or role assignments when logging in
-        await this.completeInvite({ id: userId, email: cleanEmail }).catch(e => console.warn('Auto completeInvite note:', e.message));
-
-        // 1. Check Global Admin Role
-        let { data: adminRecord } = await supabase
-            .from('admin_users')
-            .select('role')
-            .eq('user_id', userId)
-            .maybeSingle();
-
-        // 🚨 OVERRIDE: Force role for predefined system admins to fix redirection mismatches
-        if (DEFAULT_ADMINS[cleanEmail]) {
-            console.log(`>>> [AUTH_LOGIN] System Admin Override: ${cleanEmail} -> ${DEFAULT_ADMINS[cleanEmail]}`);
-            adminRecord = { role: DEFAULT_ADMINS[cleanEmail] };
+        let blockedUnverified = false;
+        if (useCols) {
+            blockedUnverified = userRecord && userRecord.is_verified === false;
+        } else {
+            const meta = data.user?.user_metadata || {};
+            blockedUnverified = meta.kincore_verified === false
+                || (meta.kincore_otp && meta.kincore_verified !== true);
         }
 
-        // 2. Discover all spaces where the user has a role across any matching email account
-        const { data: emailUsers } = await supabase.from('users').select('id').ilike('email', cleanEmail);
-        const matchingIds = [...new Set([userId, ...(emailUsers || []).map(u => u.id)])];
-
-        const [staffRes, memRes, personBranchRes, branchAdminRes] = await Promise.all([
-            supabase
-                .from('family_space_staff')
-                .select('family_space_id, role, family:family_spaces(name, visibility)')
-                .in('user_id', matchingIds)
-                .eq('is_active', true),
-            supabase
-                .from('family_memberships')
-                .select('family_space_id, role, branch_id, family:family_spaces(name, visibility)')
-                .in('user_id', matchingIds),
-            supabase
-                .from('persons')
-                .select('family_space_id, branch_id')
-                .or(`claimed_by.in.(${matchingIds.join(',')}),email.ilike.${cleanEmail}`),
-            supabase
-                .from('family_branches')
-                .select('id, family_space_id')
-                .in('branch_admin_id', matchingIds)
-        ]);
-
-        // Merge and deduplicate (Staff roles take priority)
-        const spacesMap = new Map();
-        
-        // Add membership roles first
-        (memRes.data || []).forEach(m => {
-            spacesMap.set(m.family_space_id, {
-                id: m.family_space_id,
-                name: m.family?.name || 'Unknown Family',
-                role: normalizeRole(m.role) || 'member',
-                branch_id: m.branch_id || null
-            });
-        });
-
-        // Overwrite with Staff roles (Higher priority)
-        (staffRes.data || []).forEach(s => {
-            const existing = spacesMap.get(s.family_space_id) || {};
-            spacesMap.set(s.family_space_id, {
-                id: s.family_space_id,
-                name: s.family?.name || 'Unknown Family',
-                role: normalizeRole(s.role) || 'staff',
-                branch_id: existing.branch_id || null
-            });
-        });
-
-        const allSpaces = Array.from(spacesMap.values());
-        
-        let primarySpace = null;
-        if (allSpaces.length > 0) {
-            const roleWeights = { 
-                'owner': 5, 
-                'admin': 4, 
-                'family-admin': 4,
-                'co-admin': 3.8,
-                'branch-admin': 3.5,
-                'council': 3.5,
-                'manager': 3, 
-                'editor': 2, 
-                'staff': 1.5, 
-                'member': 1 
-            };
-            
-            primarySpace = allSpaces.sort((a, b) => {
-                const weightA = roleWeights[a.role] || 0;
-                const weightB = roleWeights[b.role] || 0;
-                return weightB - weightA;
-            })[0];
+        if (blockedUnverified) {
+            await supabase.auth.signOut();
+            throw new Error('Please verify your email with the OTP sent during signup before signing in.');
         }
 
-        // 3. Update Telemetry
-        await supabase
-            .from('users')
-            .update({ last_login_at: new Date().toISOString() })
-            .eq('id', userId);
-
-        // 🚨 Fallback only for global platform/super admins without explicit memberships
-        if (!primarySpace && adminRecord && ['platform-admin', 'super_admin', 'business-admin'].includes(adminRecord.role)) {
-            const { data: firstSpace } = await supabase.from('family_spaces').select('id, name').limit(1).maybeSingle();
-            if (firstSpace) {
-                primarySpace = { id: firstSpace.id, name: firstSpace.name, role: normalizeRole(adminRecord.role) };
-            }
-        }
-
-        const resolvedRole = DEFAULT_ADMINS[cleanEmail] 
-            || (adminRecord && ['platform-admin', 'superadmin', 'super_admin'].includes(adminRecord.role) ? adminRecord.role : null)
-            || normalizeRole(primarySpace?.role) 
-            || normalizeRole(adminRecord?.role) 
-            || 'member';
-
-        const resolvedBranchId = primarySpace?.branch_id
-            || branchAdminRes?.data?.[0]?.id
-            || personBranchRes?.data?.find(p => p.branch_id)?.branch_id
-            || null;
-
-        const personId = await resolvePrimaryPerson({
+        return buildLoginResult({
             userId,
-            email: cleanEmail,
-            matchingIds,
-            primarySpace,
-            profile: data.user
+            cleanEmail,
+            authUser: data.user,
+            accessToken: data.session.access_token
         });
-
-        return {
-            token: data.session.access_token,
-            user: {
-                ...data.user,
-                role: resolvedRole,
-                family_id: primarySpace?.id || null,
-                family_name: primarySpace?.name || null,
-                person_id: personId,
-                target_person_id: personId,
-                spaces: allSpaces,
-                branch_id: cleanEmail === 'branch@admin.com' 
-                    ? '6b8eb992-571f-4637-b031-a56007560cad' 
-                    : resolvedBranchId
-            }
-        };
     },
 
     async oauthLogin({ email, access_token, id_token, provider, client_type, allow_signup }) {
@@ -441,6 +701,7 @@ export const AuthService = {
                     last_name: userObj?.user_metadata?.last_name || userObj?.user_metadata?.family_name || null,
                     avatar_url: userObj?.user_metadata?.avatar_url || userObj?.user_metadata?.picture || null,
                     status: 'active',
+                    is_verified: true,
                     created_at: new Date().toISOString()
                 }).select().single();
                 userRecord = newUser || { id: userId, email: cleanEmail };
@@ -536,10 +797,104 @@ export const AuthService = {
         return true;
     },
 
-    async verifyOtp({ email, token, type }) {
-        const { data, error } = await supabase.auth.verifyOtp({ email, token, type: type || 'signup' });
-        if (error) throw error;
-        return data.session;
+    /**
+     * Verify signup email OTP and return the same payload shape as login.
+     * Accepts { email, otp } (preferred) or legacy { email, token }.
+     */
+    async verifyOtp({ email, otp, token }) {
+        if (!email) throw new Error('Email is required');
+        const cleanEmail = String(email).trim().toLowerCase().replace(/[“”"']/g, '');
+        const code = String(otp ?? token ?? '').trim();
+        if (!code) throw new Error('OTP is required');
+
+        const state = await readSignupOtpState(cleanEmail);
+        if (!state) throw new Error('No account found with this email. Please sign up first.');
+        if (state.userRow.status === 'suspended') {
+            throw new Error('Your account has been suspended. Please contact support.');
+        }
+
+        if (state.isVerified) {
+            const { createSessionForEmail } = await import('./googleAuthService.js');
+            const session = await createSessionForEmail(cleanEmail);
+            const { data: authData } = await supabase.auth.getUser(session.access_token);
+            return buildLoginResult({
+                userId: state.userRow.id,
+                cleanEmail,
+                authUser: authData?.user || { id: state.userRow.id, email: cleanEmail },
+                accessToken: session.access_token
+            });
+        }
+
+        if (!state.otp || String(state.otp) !== code) {
+            throw new Error('Invalid OTP. Please check the code and try again.');
+        }
+        if (!state.otpExpiresAt || new Date(state.otpExpiresAt).getTime() < Date.now()) {
+            throw new Error('OTP has expired. Please request a new code.');
+        }
+
+        await clearSignupOtpState({
+            userId: state.userRow.id,
+            userRow: state.userRow,
+            useCols: state.useCols
+        });
+
+        const { createSessionForEmail } = await import('./googleAuthService.js');
+        const session = await createSessionForEmail(cleanEmail);
+        if (!session?.access_token) {
+            throw new Error('Verification succeeded but session could not be created');
+        }
+
+        const { data: authData } = await supabase.auth.getUser(session.access_token);
+
+        return buildLoginResult({
+            userId: state.userRow.id,
+            cleanEmail,
+            authUser: authData?.user || {
+                id: state.userRow.id,
+                email: cleanEmail,
+                user_metadata: {
+                    first_name: state.userRow.first_name,
+                    last_name: state.userRow.last_name
+                }
+            },
+            accessToken: session.access_token
+        });
+    },
+
+    async resendOtp({ email }) {
+        if (!email) throw new Error('Email is required');
+        const cleanEmail = String(email).trim().toLowerCase().replace(/[“”"']/g, '');
+
+        const state = await readSignupOtpState(cleanEmail);
+        if (!state) throw new Error('No account found with this email. Please sign up first.');
+        if (state.userRow.status === 'suspended') {
+            throw new Error('Your account has been suspended. Please contact support.');
+        }
+        if (state.isVerified) {
+            throw new Error('This account is already verified. Please sign in.');
+        }
+
+        const otp = generateSignupOtp();
+        const otpExpiresAt = otpExpiryIso();
+
+        await writeSignupOtpState({
+            userId: state.userRow.id,
+            cleanEmail,
+            firstName: state.userRow.first_name || '',
+            lastName: state.userRow.last_name || '',
+            date_of_birth: null,
+            auto_verify: false,
+            otp,
+            otpExpiresAt
+        });
+
+        await sendSignupOtpEmail({
+            to: cleanEmail,
+            otp,
+            firstName: state.userRow.first_name || ''
+        });
+
+        return { message: 'New OTP sent to email' };
     },
 
     async changePassword({ new_password }) {

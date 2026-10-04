@@ -94,7 +94,9 @@ import {
     getDeployStatus,
     recordDeployRevision,
     rollbackDeploy,
-    updateDeployEnvironment
+    updateDeployEnvironment,
+    getEmailBrandingSettings,
+    updateEmailBrandingSettings
 } from '../controllers/devopsController.js';
 import { getSystemLogs, exportSystemLogs } from '../controllers/logsController.js';
 import {
@@ -256,6 +258,8 @@ router.patch('/devops/incidents/:id', authMiddleware, requirePlatformRole(['supe
 router.get('/devops/configs', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), getSystemConfigs);
 router.get('/devops/configs/history', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), getConfigHistory);
 router.patch('/devops/configs/bulk', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), bulkUpdateConfigs);
+router.get('/devops/email-templates', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), getEmailBrandingSettings);
+router.patch('/devops/email-templates', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), updateEmailBrandingSettings);
 
 // API Key Lifecycle
 router.get('/devops/api-keys', authMiddleware, requirePlatformRole(['super_admin', 'business', 'devops']), getApiKeys);

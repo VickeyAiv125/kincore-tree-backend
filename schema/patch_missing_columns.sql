@@ -6,6 +6,7 @@ ALTER TABLE public.events ADD COLUMN IF NOT EXISTS cover_photo_url VARCHAR(500);
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS include_gift_exchange BOOLEAN DEFAULT false;
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS request_rsvp BOOLEAN DEFAULT false;
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS send_reminders BOOLEAN DEFAULT false;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS participation_scope TEXT NULL;
 
 -- Family spaces cover photo
 ALTER TABLE public.family_spaces ADD COLUMN IF NOT EXISTS cover_image VARCHAR(500);

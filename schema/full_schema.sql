@@ -472,6 +472,12 @@ CREATE TABLE IF NOT EXISTS public.events (
     request_rsvp BOOLEAN DEFAULT false,
     include_gift_exchange BOOLEAN DEFAULT false,
     send_reminders BOOLEAN DEFAULT false,
+    budget TEXT NULL,
+    draw_date TIMESTAMPTZ NULL,
+    gift_deadline TIMESTAMPTZ NULL,
+    exclude_same_household BOOLEAN DEFAULT false,
+    gift_draw_completed BOOLEAN DEFAULT false,
+    participation_scope TEXT NULL,
     created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
 );
 
@@ -483,6 +489,18 @@ CREATE TABLE IF NOT EXISTS public.event_rsvps (
     guest_count INTEGER DEFAULT 0,
     responded_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()),
     UNIQUE(event_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.gift_exchange_participants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    recipient_id UUID NULL REFERENCES public.users(id) ON DELETE SET NULL,
+    preferences TEXT NULL,
+    gift_status VARCHAR(40) NOT NULL DEFAULT 'Not Started',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
+    UNIQUE (event_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.secret_santa_exchanges (

@@ -7,6 +7,7 @@ import {
     refreshToken,
     requestOtp,
     verifyOtp,
+    resendOtp,
     changePassword,
     completeInvite,
     webForgotPassword,
@@ -18,6 +19,7 @@ import {
     facebookAuthStart,
     facebookAuthCallback,
     facebookAuthStatus,
+    oauthHandoff,
     kccLogin,
     kccAuthStatus
 } from '../controllers/authController.js';
@@ -28,6 +30,7 @@ const router = express.Router();
 router.post('/signup', signup);
 router.post('/login', login);
 router.post('/oauth-login', oauthLogin);
+router.get('/oauth-handoff', oauthHandoff);
 router.post('/logout', logout);
 router.post('/refresh-token', refreshToken);
 
@@ -47,6 +50,7 @@ router.get('/kcc/status', kccAuthStatus);
 
 router.post('/request-otp', requestOtp);
 router.post('/verify-otp', verifyOtp);
+router.post('/resend-otp', resendOtp);
 router.post('/change-password', authMiddleware, changePassword);
 router.post('/complete-invite', authMiddleware, completeInvite);
 

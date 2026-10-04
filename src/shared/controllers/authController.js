@@ -21,17 +21,51 @@ import {
     buildOAuthCallbackRedirect,
     parseOAuthStartQuery
 } from '../../utils/oauthRedirectUtils.js';
+import {
+    cacheOAuthRedirectForCode,
+    consumeOAuthHandoffTicket,
+    getCachedOAuthRedirectForCode
+} from '../../utils/oauthHandoffStore.js';
+
+const oauthRedirectErrorMessage = (err, fallback) => {
+    const raw = err?.message || String(err || fallback || 'Sign-in failed');
+    if (raw.toLowerCase().includes('invalid_grant')) {
+        return 'Sign-in expired or was already used. Return to the Kincore app and tap the social login button once (do not refresh the browser).';
+    }
+    return raw;
+};
+
+const finishOAuthCallbackRedirect = ({
+    clientType,
+    redirectTo,
+    token,
+    provider,
+    code
+}) => {
+    // Native app (existing APK): kincore://auth/callback?token=...&provider=...
+    // Future app builds may use GET /api/auth/oauth-handoff?oauth_ticket=... instead of long tokens in the URL.
+    const redirectUrl = buildOAuthCallbackRedirect({
+        clientType,
+        redirectTo,
+        params: { token, provider }
+    });
+    if (code) cacheOAuthRedirectForCode(code, redirectUrl);
+    return redirectUrl;
+};
 
 export const signup = async (req, res) => {
     try {
-        const { user, assignedRole, requires_email_confirmation } = await AuthService.signup(req.body);
+        const result = await AuthService.signup(req.body);
+        if (result.otp_required) {
+            return res.status(201).json({
+                message: result.message || 'OTP sent successfully to email'
+            });
+        }
         res.status(201).json({
-            message: requires_email_confirmation
-                ? 'Account created. Please check your email to confirm before signing in.'
-                : 'User registered successfully',
-            user,
-            assigned_role: assignedRole || 'standard_user',
-            requires_email_confirmation: !!requires_email_confirmation
+            message: result.message || 'User registered successfully',
+            user: result.user,
+            assigned_role: result.assignedRole || 'standard_user',
+            requires_email_confirmation: !!result.requires_email_confirmation
         });
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -54,6 +88,25 @@ export const oauthLogin = async (req, res) => {
         res.json({ message: 'OAuth login successful', ...result });
     } catch (err) {
         res.status(401).json({ error: err.message });
+    }
+};
+
+/** Native app: exchange short-lived ticket from deep link (avoids duplicate code / long URLs). */
+export const oauthHandoff = async (req, res) => {
+    try {
+        const ticket = req.query.ticket || req.query.oauth_ticket;
+        const meta = consumeOAuthHandoffTicket(ticket);
+        if (!meta?.token) {
+            return res.status(400).json({
+                error: 'OAuth handoff expired or invalid. Please sign in again from the app.'
+            });
+        }
+        res.json({
+            token: meta.token,
+            provider: meta.provider || 'google'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || 'OAuth handoff failed' });
     }
 };
 
@@ -92,11 +145,16 @@ export const googleAuthCallback = async (req, res) => {
             throw new Error(errorDescription || error || 'Google authorization was denied');
         }
         if (!code) throw new Error('Missing authorization code from Google');
+        const codeStr = String(code);
+        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
+        if (cachedRedirect) {
+            return res.redirect(cachedRedirect);
+        }
         if (!stateMeta) {
             throw new Error('Invalid or expired Google sign-in state. Please try again.');
         }
 
-        const { profile } = await exchangeGoogleCode(String(code));
+        const { profile } = await exchangeGoogleCode(codeStr);
         if (!profile.emailVerified) {
             throw new Error('Google email is not verified. Use a verified Google account.');
         }
@@ -111,20 +169,19 @@ export const googleAuthCallback = async (req, res) => {
             allow_signup: true
         });
 
-        return res.redirect(buildOAuthCallbackRedirect({
+        return res.redirect(finishOAuthCallbackRedirect({
             clientType,
             redirectTo,
-            params: {
-                token: result.token,
-                provider: 'google'
-            }
+            token: result.token,
+            provider: 'google',
+            code: codeStr
         }));
     } catch (err) {
         console.error('[GOOGLE_AUTH_CALLBACK]', err);
         return res.redirect(buildOAuthCallbackRedirect({
             clientType,
             redirectTo,
-            error: err.message || 'Google sign-in failed'
+            error: oauthRedirectErrorMessage(err, 'Google sign-in failed')
         }));
     }
 };
@@ -178,11 +235,16 @@ export const facebookAuthCallback = async (req, res) => {
             throw new Error(errorDescription || errorReason || error || 'Facebook authorization was denied');
         }
         if (!code) throw new Error('Missing authorization code from Facebook');
+        const codeStr = String(code);
+        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
+        if (cachedRedirect) {
+            return res.redirect(cachedRedirect);
+        }
         if (!stateMeta) {
             throw new Error('Invalid or expired Facebook sign-in state. Please try again.');
         }
 
-        const { profile } = await exchangeFacebookCode(String(code));
+        const { profile } = await exchangeFacebookCode(codeStr);
         await ensureUserFromSocialProfile(profile);
         const session = await createSessionForEmail(profile.email);
 
@@ -193,20 +255,19 @@ export const facebookAuthCallback = async (req, res) => {
             allow_signup: true
         });
 
-        return res.redirect(buildOAuthCallbackRedirect({
+        return res.redirect(finishOAuthCallbackRedirect({
             clientType,
             redirectTo,
-            params: {
-                token: result.token,
-                provider: 'facebook'
-            }
+            token: result.token,
+            provider: 'facebook',
+            code: codeStr
         }));
     } catch (err) {
         console.error('[FACEBOOK_AUTH_CALLBACK]', err);
         return res.redirect(buildOAuthCallbackRedirect({
             clientType,
             redirectTo,
-            error: err.message || 'Facebook sign-in failed'
+            error: oauthRedirectErrorMessage(err, 'Facebook sign-in failed')
         }));
     }
 };
@@ -278,8 +339,17 @@ export const requestOtp = async (req, res) => {
 
 export const verifyOtp = async (req, res) => {
     try {
-        const session = await AuthService.verifyOtp(req.body);
-        res.json({ message: 'Verification successful', session });
+        const result = await AuthService.verifyOtp(req.body);
+        res.json({ message: 'Login successful', ...result });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+export const resendOtp = async (req, res) => {
+    try {
+        const result = await AuthService.resendOtp(req.body);
+        res.json({ message: result.message || 'New OTP sent to email' });
     } catch (err) {
         res.status(400).json({ error: err.message });
     }

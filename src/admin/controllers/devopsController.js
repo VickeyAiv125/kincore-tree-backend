@@ -2414,3 +2414,33 @@ export const rollbackDeploy = async (req, res) => {
     }
 };
 
+export const getEmailBrandingSettings = async (req, res) => {
+    try {
+        const {
+            getEmailBranding,
+            DEFAULT_EMAIL_BRANDING,
+            buildSamplePreviewEmail
+        } = await import('../../services/emailTemplateService.js');
+        const branding = await getEmailBranding();
+        const sample = buildSamplePreviewEmail(branding);
+        res.json({
+            branding,
+            defaults: DEFAULT_EMAIL_BRANDING,
+            preview_html: sample.html
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+export const updateEmailBrandingSettings = async (req, res) => {
+    try {
+        const { saveEmailBranding, buildSamplePreviewEmail } = await import('../../services/emailTemplateService.js');
+        const merged = await saveEmailBranding(req.body?.branding || req.body, req.user?.id);
+        const sample = buildSamplePreviewEmail(merged);
+        res.json({ branding: merged, preview_html: sample.html });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+

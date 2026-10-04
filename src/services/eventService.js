@@ -19,12 +19,18 @@ const EVENT_COLUMNS = new Set([
     'rsvp_deadline',
     'branch_name',
     'audience',
+    'participation_scope',
     'invite_methods',
     'reminders',
     'guests_allowed',
     'request_rsvp',
     'include_gift_exchange',
-    'send_reminders'
+    'send_reminders',
+    'budget',
+    'draw_date',
+    'gift_deadline',
+    'exclude_same_household',
+    'gift_draw_completed'
 ]);
 
 const toBool = (value) => value === true || value === 'true' || value === '1';
@@ -47,7 +53,13 @@ const pickEventRow = (raw = {}) => {
     const row = {};
     for (const [key, value] of Object.entries(raw)) {
         if (!EVENT_COLUMNS.has(key) || value === undefined) continue;
-        if (key === 'request_rsvp' || key === 'include_gift_exchange' || key === 'send_reminders') {
+        if (
+            key === 'request_rsvp'
+            || key === 'include_gift_exchange'
+            || key === 'send_reminders'
+            || key === 'exclude_same_household'
+            || key === 'gift_draw_completed'
+        ) {
             row[key] = toBool(value);
             continue;
         }
@@ -132,7 +144,7 @@ export const EventService = {
      * Comprehensive event fetcher.
      * Supports filtering by family, type, and current status.
      */
-    async getEvents({ familyId, filter, search, isAdmin = false, userId = null } = {}) {
+    async getEvents({ familyId, filter, search, type, isAdmin = false, userId = null } = {}) {
         const now = new Date().toISOString();
 
         let query = supabase
@@ -146,6 +158,11 @@ export const EventService = {
 
         if (familyId && !isAdmin) {
             query = query.eq('family_space_id', familyId);
+        }
+
+        const giftType = String(type || '').toLowerCase();
+        if (giftType === 'gift_exchange' || giftType === 'gift_swap' || giftType === 'gift') {
+            query = query.eq('include_gift_exchange', true);
         }
 
         if (filter === 'past') {
@@ -167,7 +184,14 @@ export const EventService = {
         const { data, error } = await query;
         if (error) throw error;
 
-        return data.map(event => this.normalizeEvent(event, userId));
+        const normalized = data.map(event => this.normalizeEvent(event, userId));
+
+        if (giftType === 'gift_exchange' || giftType === 'gift_swap' || giftType === 'gift' || normalized.some(e => e.include_gift_exchange)) {
+            const { GiftExchangeService } = await import('./giftExchangeService.js');
+            return GiftExchangeService.enrichGiftFlags(normalized, userId);
+        }
+
+        return normalized;
     },
 
     normalizeEvent(event, userId = null) {
@@ -225,7 +249,19 @@ export const EventService = {
             image_url: event.cover_image || event.cover_photo_url || '',
             send_reminders: toBool(event.send_reminders) || toBool(event.invite_methods?.send_reminders) || toBool(event.invite_methods?.notification),
             request_rsvp: toBool(event.request_rsvp) || toBool(event.invite_methods?.request_rsvp),
-            include_gift_exchange: toBool(event.include_gift_exchange) || toBool(event.invite_methods?.include_gift_exchange)
+            include_gift_exchange: toBool(event.include_gift_exchange) || toBool(event.invite_methods?.include_gift_exchange),
+            audience: event.audience || null,
+            participation_scope:
+                event.participation_scope
+                || event.invite_methods?.participation_scope
+                || event.audience
+                || null,
+            budget: event.budget || null,
+            draw_date: event.draw_date || null,
+            gift_deadline: event.gift_deadline || null,
+            exclude_same_household: toBool(event.exclude_same_household),
+            gift_draw_completed: toBool(event.gift_draw_completed),
+            isDrawCompleted: toBool(event.gift_draw_completed)
         };
     },
 
@@ -255,9 +291,14 @@ export const EventService = {
             dress_code, 
             etiquette_notes,
             audience,
+            participation_scope,
             invite_methods,
             reminders,
             guests_allowed,
+            budget,
+            draw_date,
+            gift_deadline,
+            exclude_same_household,
             ...insertData 
         } = eventData;
 
@@ -270,6 +311,26 @@ export const EventService = {
         insertData.include_gift_exchange = includeGift;
         insertData.send_reminders = sendReminders;
         insertData.request_rsvp = toBool(insertData.request_rsvp);
+        insertData.exclude_same_household = toBool(exclude_same_household ?? insertData.exclude_same_household);
+        insertData.gift_draw_completed = false;
+
+        if (budget !== undefined) insertData.budget = budget || null;
+        if (draw_date !== undefined) insertData.draw_date = draw_date || null;
+        if (gift_deadline !== undefined) insertData.gift_deadline = gift_deadline || null;
+
+        // Map legacy secret_santa_data into new event gift fields when present
+        if (includeGift && secret_santa_data) {
+            const santa = typeof secret_santa_data === 'string' ? JSON.parse(secret_santa_data) : secret_santa_data;
+            if (!insertData.budget && (santa.budgetMin != null || santa.budgetMax != null || santa.budget)) {
+                insertData.budget = santa.budget || `$${santa.budgetMin || 0} - $${santa.budgetMax || 0}`;
+            }
+            if (!insertData.gift_deadline && santa.giftDeadline) {
+                insertData.gift_deadline = santa.giftDeadline;
+            }
+            if (!insertData.draw_date && santa.drawDate) {
+                insertData.draw_date = santa.drawDate;
+            }
+        }
 
         if (!coverFile && typeof insertData.cover_photo === 'string' && insertData.cover_photo.startsWith('http')) {
             insertData.cover_photo_url = insertData.cover_photo_url || insertData.cover_photo;
@@ -312,9 +373,18 @@ export const EventService = {
             ? (typeof reminders === 'string' ? JSON.parse(reminders) : reminders)
             : (sendReminders ? ['1d before'] : []);
 
+        const scope = (participation_scope || audience || 'Entire family').toString().trim()
+            || 'Entire family';
+
+        parsedInviteMethods = {
+            ...parsedInviteMethods,
+            participation_scope: scope
+        };
+
         const event = await insertEventRow({
             ...pickEventRow(insertData),
-            audience: audience || 'Entire family',
+            audience: audience || scope,
+            participation_scope: scope,
             invite_methods: parsedInviteMethods,
             reminders: parsedReminders,
             guests_allowed: guests_allowed || 0,
@@ -322,6 +392,11 @@ export const EventService = {
             cover_image: coverImageUrl,
             created_at: new Date().toISOString()
         });
+
+        // Surface scope even when the DB column is not migrated yet
+        if (!event.participation_scope) {
+            event.participation_scope = scope;
+        }
 
         try {
             if (insertData.family_space_id) {
@@ -435,6 +510,14 @@ export const EventService = {
             cleanDescription += ` <!--INVITED_PERSONS:${personIds.join(',')}-->`;
         }
         updateData.description = cleanDescription;
+
+        // Keep audience in sync when participation_scope is the only boundary field sent
+        if (updateData.participation_scope != null && updateData.audience === undefined) {
+            updateData.audience = updateData.participation_scope;
+        }
+        if (updateData.audience != null && updateData.participation_scope === undefined) {
+            updateData.participation_scope = updateData.audience;
+        }
 
         const { data, error } = await supabase
             .from('events')
