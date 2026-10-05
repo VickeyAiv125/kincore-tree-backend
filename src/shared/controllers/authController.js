@@ -19,7 +19,8 @@ import {
 import { getKccClientConfig, loginWithKccId } from '../../services/kccAuthService.js';
 import {
     buildOAuthCallbackRedirect,
-    parseOAuthStartQuery
+    parseOAuthStartQuery,
+    resolveOAuthRedirectBase
 } from '../../utils/oauthRedirectUtils.js';
 import {
     cacheOAuthRedirectForCode,
@@ -146,12 +147,13 @@ export const googleAuthCallback = async (req, res) => {
         }
         if (!code) throw new Error('Missing authorization code from Google');
         const codeStr = String(code);
-        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
-        if (cachedRedirect) {
-            return res.redirect(cachedRedirect);
-        }
         if (!stateMeta) {
             throw new Error('Invalid or expired Google sign-in state. Please try again.');
+        }
+        const expectedBase = resolveOAuthRedirectBase({ clientType, redirectTo });
+        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
+        if (cachedRedirect && cachedRedirect.startsWith(expectedBase)) {
+            return res.redirect(cachedRedirect);
         }
 
         const { profile } = await exchangeGoogleCode(codeStr);
@@ -236,12 +238,13 @@ export const facebookAuthCallback = async (req, res) => {
         }
         if (!code) throw new Error('Missing authorization code from Facebook');
         const codeStr = String(code);
-        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
-        if (cachedRedirect) {
-            return res.redirect(cachedRedirect);
-        }
         if (!stateMeta) {
             throw new Error('Invalid or expired Facebook sign-in state. Please try again.');
+        }
+        const expectedBase = resolveOAuthRedirectBase({ clientType, redirectTo });
+        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
+        if (cachedRedirect && cachedRedirect.startsWith(expectedBase)) {
+            return res.redirect(cachedRedirect);
         }
 
         const { profile } = await exchangeFacebookCode(codeStr);

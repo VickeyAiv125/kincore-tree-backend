@@ -38,14 +38,34 @@ export const getAllowedOAuthOrigins = () => {
     return origins;
 };
 
+const normalizeClientType = (raw) => {
+    const value = String(raw || 'web').toLowerCase().replace(/-/g, '_');
+    if (value === 'app' || value === 'native') return 'app';
+    if (value === 'mobile_web' || value === 'mobileweb' || value === 'flutter_web') {
+        return 'mobile_web';
+    }
+    return 'web';
+};
+
 export const parseOAuthStartQuery = (query = {}) => {
-    const clientType = String(query.client_type || 'web').toLowerCase() === 'app' ? 'app' : 'web';
     const redirectTo = query.redirect_to || query.redirect_uri || null;
     return {
         mode: String(query.mode || 'login'),
-        clientType,
+        clientType: normalizeClientType(query.client_type),
         redirectTo: redirectTo ? String(redirectTo).trim() : null
     };
+};
+
+const isCustomSchemeUrl = (url) =>
+    url && /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^https?:/i.test(url);
+
+const resolveAllowedHttpsRedirect = (redirectTo, allowed, fallback) => {
+    if (!redirectTo || !/^https?:/i.test(redirectTo)) return null;
+    const origin = parseOrigin(redirectTo);
+    if (origin && allowed.has(origin)) {
+        return redirectTo.replace(/\/$/, '');
+    }
+    return fallback.replace(/\/$/, '');
 };
 
 export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
@@ -56,32 +76,34 @@ export const resolveOAuthRedirectBase = ({ clientType, redirectTo }) => {
     const appWebDefault = trim(
         process.env.APP_URL
         || process.env.MOBILE_WEB_URL
-        || 'https://kincore-tree.netlify.app'
+        || 'https://uat-app.kincore.com'
     );
     const allowed = getAllowedOAuthOrigins();
 
-    if (clientType !== 'app') {
+    // Flutter web / mobile browser — never send users to kincore://
+    if (clientType === 'mobile_web') {
+        return resolveAllowedHttpsRedirect(redirectTo, allowed, appWebDefault)
+            || appWebDefault.replace(/\/$/, '');
+    }
+
+    if (clientType === 'web') {
         return `${webFrontend}/auth/callback`;
     }
 
-    // Prefer explicit redirect_to, then native deep link, then optional web APP_URL.
-    const candidate = redirectTo || appDeepLinkDefault || appWebDefault;
+    // Native app: explicit HTTPS redirect_to (e.g. uat-app) wins over deep link
+    const httpsTarget = resolveAllowedHttpsRedirect(redirectTo, allowed, null);
+    if (httpsTarget) return httpsTarget;
 
-    // Native app custom scheme (e.g. kincore://auth/callback)
-    if (candidate && /^[a-z][a-z0-9+.-]*:/i.test(candidate) && !/^https?:/i.test(candidate)) {
-        return candidate.replace(/\/$/, '');
+    if (redirectTo && isCustomSchemeUrl(redirectTo)) {
+        return redirectTo.replace(/\/$/, '');
     }
 
-    const origin = parseOrigin(candidate);
-    if (!origin || !allowed.has(origin)) {
-        // Never fall back to a web URL when a deep link default exists.
-        if (appDeepLinkDefault && !/^https?:/i.test(appDeepLinkDefault)) {
-            return appDeepLinkDefault;
-        }
-        return appWebDefault;
+    if (redirectTo && /^https?:/i.test(redirectTo)) {
+        // HTTPS requested but not allowlisted — stay on web app, not native deep link
+        return appWebDefault.replace(/\/$/, '');
     }
 
-    return candidate.replace(/\/$/, '');
+    return (appDeepLinkDefault || appWebDefault).replace(/\/$/, '');
 };
 
 export const appendOAuthQuery = (baseUrl, params = {}) => {
