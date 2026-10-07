@@ -405,12 +405,20 @@ const buildLoginResult = async ({ userId, cleanEmail, authUser, accessToken }) =
 };
 
 export const AuthService = {
-    async signup({ email, password, first_name, last_name, date_of_birth, auto_verify = false }) {
-        if (!email || !password) {
-            throw new Error('Email and password are required');
+    async signup({ email, password, first_name, last_name, date_of_birth, identifier, handler, wallet_handle, auto_verify = false }) {
+        const rawId = String(identifier || email || '').trim().replace(/[“”"']/g, '');
+        const kccHandler = String(handler || wallet_handle || '').trim();
+        if (!rawId || !password) {
+            throw new Error('Email or KCC ID handle, and password, are required');
         }
 
-        const cleanEmail = email.trim().toLowerCase().replace(/[“”"']/g, '');
+        // A KCC handler is not an email. Link that account instead of rejecting it.
+        if (!rawId.includes('@')) {
+            const { loginWithKccId } = await import('./kccAuthService.js');
+            return loginWithKccId({ identifier: rawId, password });
+        }
+
+        const cleanEmail = rawId.toLowerCase();
         const firstName = first_name || '';
         const lastName = last_name || '';
         const useCols = await usersHaveOtpColumns();
@@ -510,6 +518,13 @@ export const AuthService = {
                 requires_email_confirmation: false,
                 otp_required: false
             };
+        }
+
+        if (kccHandler && !kccHandler.includes('@')) {
+            await supabase
+                .from('users')
+                .update({ wallet_handle: kccHandler.toLowerCase() })
+                .eq('id', userId);
         }
 
         await sendSignupOtpEmail({ to: cleanEmail, otp, firstName });

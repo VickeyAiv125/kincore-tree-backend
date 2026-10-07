@@ -3,6 +3,7 @@ import { supabase } from '../config/supabaseClient.js';
 /** Kincore brand (matches frontend tailwind brand.orange) */
 export const DEFAULT_EMAIL_BRANDING = {
     brand_name: 'Kincore',
+    logo_url: 'https://uat-admin.kincore.com/logo.png',
     header_tagline: 'ACCOUNT NOTIFICATION',
     primary_color: '#FF622E',
     primary_color_dark: '#E04E1A',
@@ -121,6 +122,7 @@ export function buildAccountNotificationEmail({
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;">
           <tr>
             <td style="background:${primary};border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;">
+              ${b.logo_url ? `<img src="${escapeHtml(b.logo_url)}" alt="${escapeHtml(b.brand_name)}" width="72" height="72" style="display:block;margin:0 auto 14px;width:72px;height:72px;border-radius:50%;background:#ffffff;border:4px solid #ffffff;" />` : ''}
               <div style="font-size:26px;font-weight:800;color:#ffffff;line-height:1.2;">${escapeHtml(b.brand_name)}</div>
               <div style="font-size:11px;letter-spacing:0.18em;color:rgba(255,255,255,0.92);margin-top:10px;font-weight:700;">${escapeHtml(b.header_tagline)}</div>
             </td>

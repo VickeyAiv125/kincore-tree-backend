@@ -10,6 +10,42 @@ import { AuthService } from './authService.js';
 
 const trim = (v) => String(v || '').trim();
 
+const firstText = (...values) => {
+    for (const value of values) {
+        const clean = trim(value);
+        if (clean) return clean;
+    }
+    return '';
+};
+
+/** KCC ID username. Userinfo uses `handler`; older payloads use handle / preferred_username. */
+const readKccHandler = (info, typedId) => {
+    const bags = [info, info?.user, info?.data, info?.profile].filter((bag) => bag && typeof bag === 'object');
+    for (const bag of bags) {
+        const handler = firstText(
+            bag.handler,
+            bag.handle,
+            bag.wallet_handle,
+            bag.preferred_username,
+            bag.username,
+            bag.kcc_id,
+            bag.kccid
+        );
+        if (handler && !handler.includes('@') && !handler.includes(' ')) return handler;
+    }
+    if (typedId && !typedId.includes('@') && !typedId.includes(' ')) return typedId;
+    return '';
+};
+
+const readKccEmail = (info, typedId) => {
+    const bags = [info, info?.user, info?.data, info?.profile].filter((bag) => bag && typeof bag === 'object');
+    for (const bag of bags) {
+        const email = firstText(bag.email, bag.email_address).toLowerCase();
+        if (email.includes('@')) return email;
+    }
+    return typedId.includes('@') ? typedId.toLowerCase() : '';
+};
+
 export const getKccClientConfig = () => {
     const baseUrl = trim(process.env.KCC_ID_BASE_URL || 'https://uat-auth.bigkpay.com').replace(/\/$/, '');
     const clientId = trim(process.env.KCC_CLIENT_ID || 'kincore');
@@ -86,7 +122,8 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
 
     let profile = {
         sub: null,
-        email: cleanId.includes('@') ? cleanId.toLowerCase() : null,
+        email: cleanId.includes('@') ? cleanId.toLowerCase() : '',
+        handler: readKccHandler(null, cleanId),
         emailVerified: true,
         firstName: '',
         lastName: '',
@@ -101,16 +138,17 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
         });
         if (infoRes.ok) {
             const info = await infoRes.json();
-            const name = info.name || info.preferred_username || '';
-            const parts = String(name).trim().split(/\s+/);
+            const name = firstText(info.name, info.full_name, info.preferred_username, profile.handler);
+            const parts = String(name).trim().split(/\s+/).filter(Boolean);
             profile = {
-                sub: info.sub || null,
-                email: String(info.email || profile.email || cleanId).trim().toLowerCase(),
+                sub: info.sub || info.id || null,
+                email: readKccEmail(info, cleanId),
+                handler: readKccHandler(info, cleanId),
                 emailVerified: info.email_verified !== false,
-                firstName: parts[0] || '',
-                lastName: parts.slice(1).join(' ') || '',
+                firstName: firstText(info.given_name, info.first_name, parts[0]),
+                lastName: firstText(info.family_name, info.last_name, parts.slice(1).join(' ')),
                 fullName: name,
-                avatarUrl: info.picture || null,
+                avatarUrl: info.picture || info.avatar_url || null,
                 provider: 'kcc',
                 wallet_id: info.wallet_id || null,
                 kcc_role: info.role || null
@@ -127,13 +165,13 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
     await ensureUserFromSocialProfile(profile);
     const session = await createSessionForEmail(profile.email);
 
-    // Persist KCC handle so later /auth/login can resolve it without calling KCC.
-    if (profile.email && !cleanId.includes('@')) {
+    // Keep the KCC handler even when the user signed in with an email.
+    if (profile.email && profile.handler) {
         try {
             const { supabase } = await import('../config/supabaseClient.js');
             await supabase
                 .from('users')
-                .update({ wallet_handle: cleanId.toLowerCase() })
+                .update({ wallet_handle: profile.handler.toLowerCase() })
                 .ilike('email', profile.email);
         } catch (e) {
             console.warn('[KCC_LOGIN] wallet_handle sync skipped:', e.message);

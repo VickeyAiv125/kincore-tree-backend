@@ -113,6 +113,82 @@ export const createGiftDerangement = (userIds, householdMap = null, maxAttempts 
     );
 };
 
+const DECLINED_RSVP = new Set(['declined', 'not_going', 'no', 'cancelled', 'canceled']);
+
+const addIds = (set, rows, key = 'user_id') => {
+    (rows || []).forEach((row) => {
+        if (row?.[key]) set.add(row[key]);
+    });
+};
+
+/**
+ * People who can be drawn: gift-exchange rows, event RSVPs / invites,
+ * then family members when nobody was enrolled through the join API.
+ */
+const resolveDrawUserIds = async (event) => {
+    const ids = new Set();
+    const declined = new Set();
+
+    const { data: giftRows, error: giftErr } = await supabase
+        .from('gift_exchange_participants')
+        .select('user_id')
+        .eq('event_id', event.id);
+    if (giftErr) throw giftErr;
+    addIds(ids, giftRows);
+
+    const { data: rsvps, error: rsvpErr } = await supabase
+        .from('event_rsvps')
+        .select('user_id, status')
+        .eq('event_id', event.id);
+    if (rsvpErr) throw rsvpErr;
+    (rsvps || []).forEach((row) => {
+        if (!row.user_id) return;
+        const status = String(row.status || '').toLowerCase();
+        if (DECLINED_RSVP.has(status)) declined.add(row.user_id);
+        else ids.add(row.user_id);
+    });
+
+    const invited = String(event.description || '').match(/<!--INVITED_PERSONS:([^>]*)-->/);
+    const personIds = invited?.[1]
+        ? invited[1].split(',').map((id) => id.trim()).filter(Boolean)
+        : [];
+    if (personIds.length) {
+        const { data: persons } = await supabase
+            .from('persons')
+            .select('claimed_by')
+            .in('id', personIds);
+        addIds(ids, persons, 'claimed_by');
+    }
+
+    declined.forEach((id) => ids.delete(id));
+    if (ids.size >= 2) return [...ids];
+
+    if (ids.size === 0 && event.family_space_id) {
+        const { data: members } = await supabase
+            .from('family_memberships')
+            .select('user_id, status')
+            .eq('family_space_id', event.family_space_id);
+        (members || []).forEach((row) => {
+            const status = String(row.status || 'active').toLowerCase();
+            if (row.user_id && !['removed', 'inactive', 'banned', 'left'].includes(status)) {
+                ids.add(row.user_id);
+            }
+        });
+
+        if (ids.size < 2) {
+            const { data: claimed } = await supabase
+                .from('persons')
+                .select('claimed_by')
+                .eq('family_space_id', event.family_space_id)
+                .not('claimed_by', 'is', null);
+            addIds(ids, claimed, 'claimed_by');
+        }
+    }
+
+    declined.forEach((id) => ids.delete(id));
+    return [...ids];
+};
+
 export const GiftExchangeService = {
     async getEventOrThrow(eventId) {
         const { data: event, error } = await supabase
@@ -197,19 +273,23 @@ export const GiftExchangeService = {
             throw err;
         }
 
-        const { data: participants, error: pErr } = await supabase
-            .from('gift_exchange_participants')
-            .select('id, user_id')
-            .eq('event_id', eventId);
-
-        if (pErr) throw pErr;
-        if (!participants || participants.length < 2) {
+        const userIds = await resolveDrawUserIds(event);
+        if (userIds.length < 2) {
             const err = new Error('At least 2 participants must join before the draw');
             err.status = 400;
             throw err;
         }
 
-        const userIds = participants.map((p) => p.user_id);
+        const enrolled = userIds.map((user_id) => ({
+            event_id: eventId,
+            user_id,
+            gift_status: 'Not Started',
+            updated_at: new Date().toISOString()
+        }));
+        const { error: enrollErr } = await supabase
+            .from('gift_exchange_participants')
+            .upsert(enrolled, { onConflict: 'event_id,user_id', ignoreDuplicates: true });
+        if (enrollErr) throw enrollErr;
         let householdMap = null;
         if (event.exclude_same_household) {
             householdMap = await buildHouseholdMap(event.family_space_id, userIds);

@@ -1989,7 +1989,7 @@ export const getMemberById = async (req, res) => {
         };
 
         relations.forEach(rel => {
-            if (rel.relation_type === 'parent') {
+            if (String(rel.relation_type || '').toLowerCase().startsWith('parent')) {
                 if (rel.person_id_1 === person.id) {
                     // Current person is parent, so p2 is child
                     structured.children.push({

@@ -11,6 +11,11 @@ const parseDobValue = (raw) => {
         const d = new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3], 12));
         return Number.isNaN(d.getTime()) ? null : d;
     }
+    const yearOnly = s.match(/^(\d{4})$/);
+    if (yearOnly) {
+        const d = new Date(Date.UTC(+yearOnly[1], 0, 1, 12));
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
     const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (slash) {
         const d = new Date(Date.UTC(+slash[3], +slash[1] - 1, +slash[2], 12));
@@ -20,9 +25,25 @@ const parseDobValue = (raw) => {
     return Number.isNaN(d.getTime()) ? null : d;
 };
 
+const PARENT_ROLES = new Set(['father', 'mother', 'parent']);
+const PARENT_LINKS = new Set(['biological', 'adoptive', 'step-parent', 'foster', 'guardian', 'unknown']);
+
+const encodeParentRelation = (relationship, role) => {
+    const link = PARENT_LINKS.has(relationship) ? relationship : 'biological';
+    const parentRole = PARENT_ROLES.has(role) ? role : 'parent';
+    return `parent:${link}:${parentRole}`;
+};
+
 const assertParentChildDob = ({ role, newDobRaw, targetPerson }) => {
     const newDob = parseDobValue(newDobRaw);
-    if (!newDob) return;
+    const targetDob = parseDobValue(targetPerson?.date_of_birth || targetPerson?.birth_date);
+    const who = role === 'parent' ? 'Parent' : 'Child';
+
+    if (!newDob) {
+        const err = new Error(`${who} date of birth is required.`);
+        err.status = 400;
+        throw err;
+    }
 
     const today = new Date();
     const endOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59);
@@ -32,15 +53,22 @@ const assertParentChildDob = ({ role, newDobRaw, targetPerson }) => {
         throw err;
     }
 
-    const targetDob = parseDobValue(targetPerson?.date_of_birth || targetPerson?.birth_date);
-    if (!targetDob) return;
+    if (!targetDob) {
+        const err = new Error(
+            role === 'parent'
+                ? "This person's date of birth is missing. Add it before adding a parent."
+                : "This person's date of birth is missing. Add it before adding a child."
+        );
+        err.status = 400;
+        throw err;
+    }
     if (role === 'parent' && newDob.getTime() >= targetDob.getTime()) {
-        const err = new Error("Parent's date of birth must be earlier than Self's date of birth.");
+        const err = new Error("Parent date of birth must be earlier than this person's date of birth.");
         err.status = 400;
         throw err;
     }
     if (role === 'child' && newDob.getTime() <= targetDob.getTime()) {
-        const err = new Error("Child's date of birth must be later than Self's date of birth.");
+        const err = new Error("Child date of birth must be later than this person's date of birth.");
         err.status = 400;
         throw err;
     }
@@ -283,7 +311,8 @@ export const addParent = async (req, res) => {
             family_space_id, target_person_id,
             first_name, last_name, gender, is_alive,
             date_of_birth, place_of_birth, anniversary_date,
-            current_location, avatar_url, branch_id, email
+            current_location, avatar_url, branch_id, email,
+            parent_role, relationship_to_child
         } = req.body;
         const { user, familyRole } = req;
 
@@ -356,7 +385,7 @@ export const addParent = async (req, res) => {
                 clan_tree_id: targetPerson.clan_tree_id || null,
                 person_id_1: parent.id, // Source is Parent
                 person_id_2: target_person_id, // Target is Child
-                relation_type: 'parent'
+                relation_type: encodeParentRelation(relationship_to_child, parent_role)
             });
         if (rError) throw rError;
 
@@ -988,7 +1017,7 @@ export const getTreeData = async (req, res) => {
         const childrenMap = new Map();
         if (settings.sensitiveDataRedaction && settings.postMortemAccess) {
             normalizedRelations.forEach(r => {
-                if (r.relationship_type === 'parent' || r.relation_type === 'parent') {
+                if (String(r.relationship_type || r.relation_type || '').toLowerCase().startsWith('parent')) {
                     if (!childrenMap.has(r.person_id)) childrenMap.set(r.person_id, []);
                     childrenMap.get(r.person_id).push(r.related_person_id);
                 }

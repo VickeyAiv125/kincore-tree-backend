@@ -481,6 +481,15 @@ export const EventService = {
             .single();
 
         if (error) throw error;
+
+        const joined = ['going', 'accepted', 'joined', 'yes', 'attending'].includes(String(status || '').toLowerCase());
+        if (joined) {
+            try {
+                const { GiftExchangeService } = await import('./giftExchangeService.js');
+                await GiftExchangeService.join({ eventId, userId, preferences: null });
+            } catch (_) { /* event may not be a gift exchange */ }
+        }
+
         return data;
     },
 
