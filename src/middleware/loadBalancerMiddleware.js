@@ -13,6 +13,8 @@ export const dynamicRateLimiter = rateLimit({
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
+    // Avoid hard-failing requests when proxy headers are present.
+    validate: { xForwardedForHeader: false },
 });
 
 // Virtual Load Balancer Middleware

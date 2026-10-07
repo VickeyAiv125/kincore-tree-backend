@@ -19,7 +19,8 @@ const pruneStates = () => {
     }
 };
 
-const trimEnv = (value) => String(value || '').trim();
+const trimEnv = (value) =>
+    String(value || '').trim().replace(/^['"]+|['"]+$/g, '');
 
 export const getFacebookClientConfig = () => {
     const appId = trimEnv(process.env.FACEBOOK_APP_ID || process.env.META_APP_ID);
@@ -62,9 +63,69 @@ export const buildFacebookAuthorizeUrl = ({ state }) => {
         state,
         scope: 'email,public_profile',
         response_type: 'code',
-        auth_type: 'rerequest'
+        auth_type: 'rerequest',
+        return_scopes: 'true'
     });
     return `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth?${params.toString()}`;
+};
+
+/** Stable login email when Meta grants email scope but Graph returns no address (phone-only / unconfirmed / Standard Access). */
+export const facebookPlaceholderEmail = (facebookUserId) =>
+    `fb_${String(facebookUserId).replace(/\D/g, '')}@facebook.oauth.kincore`;
+
+const placeholderEmailEnabled = () => {
+    const raw = trimEnv(process.env.FACEBOOK_PLACEHOLDER_EMAIL).toLowerCase();
+    if (['0', 'false', 'no'].includes(raw)) return false;
+    if (['1', 'true', 'yes'].includes(raw)) return true;
+    // UAT: Meta often grants email scope but returns no address without Advanced Access.
+    return trimEnv(process.env.BACKEND_URL).includes('uat-api.kincore.com');
+};
+
+const facebookEmailHelpMessage = async (accessToken) => {
+    let emailPermGranted = false;
+    try {
+        const res = await fetch(
+            `https://graph.facebook.com/${GRAPH_VERSION}/me/permissions?access_token=${encodeURIComponent(accessToken)}`
+        );
+        const data = await res.json();
+        const perms = Array.isArray(data?.data) ? data.data : [];
+        const emailPerm = perms.find((p) => p.permission === 'email');
+        if (emailPerm?.status === 'declined') {
+            return (
+                'Email permission was declined. Remove Kincore under Facebook Settings → Apps and websites, ' +
+                'then try Facebook login again and tap Allow for email.'
+            );
+        }
+        emailPermGranted = emailPerm?.status === 'granted';
+    } catch (_) {
+        /* ignore permission probe errors */
+    }
+    if (emailPermGranted) {
+        return (
+            'Facebook did not share an email. Confirm the primary email on your Facebook account, or in Meta Developer ' +
+            'Console enable Advanced Access for the email permission (App Review). You can also sign in with Google or email/password.'
+        );
+    }
+    return (
+        'Facebook did not share an email. Use a Facebook account with a verified email, allow email when prompted, ' +
+        'or sign in with Google or email/password.'
+    );
+};
+
+const resolveFacebookLoginEmail = async ({ profile, accessToken }) => {
+    if (profile.email) {
+        return String(profile.email).trim().toLowerCase();
+    }
+    const facebookId = profile.id;
+    if (!facebookId) {
+        const help = await facebookEmailHelpMessage(accessToken);
+        throw new Error(help);
+    }
+    if (placeholderEmailEnabled()) {
+        return facebookPlaceholderEmail(facebookId);
+    }
+    const help = await facebookEmailHelpMessage(accessToken);
+    throw new Error(help);
 };
 
 export const exchangeFacebookCode = async (code) => {
@@ -82,8 +143,13 @@ export const exchangeFacebookCode = async (code) => {
     );
     const tokenData = await tokenRes.json();
     if (!tokenRes.ok || tokenData.error) {
-        const msg = tokenData.error?.message || tokenData.error_description || 'Facebook token exchange failed';
-        throw new Error(msg);
+        const raw = tokenData.error?.message || tokenData.error_description || tokenData.error || 'Facebook token exchange failed';
+        if (String(raw).toLowerCase().includes('invalid_grant') || tokenData.error?.code === 100) {
+            throw new Error(
+                'Facebook sign-in expired or was already used. Close the browser, open the Kincore app, and tap Facebook again (do not refresh the login page).'
+            );
+        }
+        throw new Error(raw);
     }
 
     const fields = 'id,name,email,first_name,last_name,picture.type(large)';
@@ -95,17 +161,16 @@ export const exchangeFacebookCode = async (code) => {
         throw new Error(profile.error?.message || 'Failed to load Facebook profile');
     }
 
-    if (!profile.email) {
-        throw new Error(
-            'Facebook did not share an email. Grant email permission, or use a Facebook account with a verified email.'
-        );
-    }
+    const email = await resolveFacebookLoginEmail({
+        profile,
+        accessToken: tokenData.access_token
+    });
 
     return {
         accessToken: tokenData.access_token,
         profile: {
             sub: String(profile.id),
-            email: String(profile.email).trim().toLowerCase(),
+            email,
             emailVerified: true,
             firstName: profile.first_name || '',
             lastName: profile.last_name || '',

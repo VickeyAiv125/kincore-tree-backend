@@ -15,7 +15,8 @@ const pruneStates = () => {
     }
 };
 
-const trimEnv = (value) => String(value || '').trim();
+const trimEnv = (value) =>
+    String(value || '').trim().replace(/^['"]+|['"]+$/g, '');
 
 export const getGoogleClientConfig = () => {
     const clientId = trimEnv(process.env.GOOGLE_CLIENT_ID);
@@ -82,7 +83,13 @@ export const exchangeGoogleCode = async (code) => {
     });
     const tokenData = await tokenRes.json();
     if (!tokenRes.ok) {
-        throw new Error(tokenData.error_description || tokenData.error || 'Google token exchange failed');
+        const raw = tokenData.error_description || tokenData.error || 'Google token exchange failed';
+        if (String(raw).toLowerCase().includes('invalid_grant')) {
+            throw new Error(
+                'Google sign-in expired or was already used. Close the browser, open the Kincore app, and tap Google again (do not refresh the login page).'
+            );
+        }
+        throw new Error(raw);
     }
 
     const userRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
@@ -184,6 +191,7 @@ export const ensureUserFromGoogleProfile = async (profile) => {
                 last_name: lastName || null,
                 avatar_url: profile.avatarUrl,
                 status: 'active',
+                is_verified: true,
                 created_at: new Date().toISOString()
             })
             .select()
@@ -204,6 +212,7 @@ export const ensureUserFromGoogleProfile = async (profile) => {
     if (!appUser.first_name && firstName) updates.first_name = firstName;
     if (!appUser.last_name && lastName) updates.last_name = lastName;
     if (!appUser.avatar_url && profile.avatarUrl) updates.avatar_url = profile.avatarUrl;
+    if (appUser.is_verified === false) updates.is_verified = true;
     if (Object.keys(updates).length) {
         await supabase.from('users').update(updates).eq('id', userId);
     }

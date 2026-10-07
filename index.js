@@ -53,8 +53,60 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(helmet());
-app.use(cors());
+// Required behind nginx so express-rate-limit can read X-Forwarded-For safely.
+app.set('trust proxy', 1);
+
+// Public API is called cross-origin from uat-app / admin. Helmet's default
+// Cross-Origin-Resource-Policy: same-origin makes browsers fail XHR/fetch as a
+// network error even when Access-Control-Allow-Origin is present.
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+const corsAllowedOrigins = new Set([
+    'https://uat-app.kincore.com',
+    'https://uat-admin.kincore.com',
+    'https://uat.kincore.com',
+    'http://localhost:5173',
+    'http://localhost:5000',
+    'http://localhost:3000',
+]);
+String(process.env.CORS_ORIGINS || process.env.OAUTH_REDIRECT_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .forEach((origin) => corsAllowedOrigins.add(origin.replace(/\/$/, '')));
+[process.env.FRONTEND_URL, process.env.APP_URL, process.env.MOBILE_WEB_URL]
+    .filter(Boolean)
+    .forEach((value) => {
+        try {
+            corsAllowedOrigins.add(new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).origin);
+        } catch {
+            /* ignore invalid env URL */
+        }
+    });
+
+app.use(cors({
+    origin(origin, callback) {
+        // Non-browser clients (curl, mobile) send no Origin.
+        if (!origin || corsAllowedOrigins.has(origin)) {
+            return callback(null, true);
+        }
+        // Reflect unknown origins in UAT so SPA experiments still work; tighten in prod if needed.
+        return callback(null, true);
+    },
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'Accept',
+        'x-family-space-id',
+        'X-Requested-With',
+        'x-request-id',
+    ],
+    optionsSuccessStatus: 204,
+    maxAge: 86400,
+}));
 app.use(morgan('dev'));
 app.use(express.json());
 
@@ -100,7 +152,7 @@ app.use('/api/app/privacy', appPrivacyRoutes);
 app.use('/api/app/profile', profileRoutes);
 app.use('/api/app/members', memberRoutes);
 app.use('/api/app/calculator', calculatorRoutes);
-app.use('/api/v1/app', plenorAppRoutes);
+app.use('/api/v1', plenorAppRoutes);
 
 app.get('/health', (req, res) => {
     res.json({ status: 'v3.1.foundation.active', timestamp: new Date().toISOString() });
@@ -132,6 +184,22 @@ app.listen(PORT, async () => {
     console.log(`Kincore Tree v3.0 API running on port ${PORT}`);
     startTelemetryCron(); // Start tracking telemetry in the background
     await initWorkerHeartbeat(); // Start background worker heartbeat
+
+    // Gift exchange: auto-run draws when draw_date has passed (hourly)
+    const HOUR_MS = 60 * 60 * 1000;
+    const runGiftDrawCron = async () => {
+        try {
+            const { GiftExchangeService } = await import('./src/services/giftExchangeService.js');
+            const result = await GiftExchangeService.runDueDraws();
+            if (result.ran > 0) {
+                console.log(`[GiftExchange] Cron drew ${result.ran} event(s)`);
+            }
+        } catch (err) {
+            console.warn('[GiftExchange] Cron error:', err.message);
+        }
+    };
+    setTimeout(runGiftDrawCron, 15_000);
+    setInterval(runGiftDrawCron, HOUR_MS);
 });
 
 export default app;

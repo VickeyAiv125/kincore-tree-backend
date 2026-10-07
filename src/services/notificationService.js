@@ -2,6 +2,7 @@ import { supabase } from '../config/supabaseClient.js';
 import { logActivity } from '../utils/logger.js';
 import { sendEmail, isEmailConfigured } from './emailService.js';
 import { normalizeFamilyRole } from '../utils/familyRolePolicy.js';
+import { renderNotificationEmail } from './emailTemplateService.js';
 
 /** Family Admin Settings → Notification Channels defaults */
 export const DEFAULT_NOTIFICATION_CHANNELS = {
@@ -334,23 +335,6 @@ const resolveRecipients = async (familySpaceId, roles) => {
     return [...byUser.values()];
 };
 
-const renderTemplate = (templateKey, { title, message, action, familyName }) => {
-    const subject = title || action;
-    const bodyText = message || title || action;
-    const html = `
-      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
-        <h2 style="margin:0 0 12px">${subject}</h2>
-        <p>${bodyText}</p>
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0" />
-        <p style="font-size:12px;color:#666">
-          Kincore notification${familyName ? ` · ${familyName}` : ''}<br/>
-          Template: ${templateKey || 'default'} · Action: ${action}
-        </p>
-      </div>
-    `;
-    return { subject, text: bodyText, html };
-};
-
 /**
  * Dispatch a notification based on family space policies.
  */
@@ -465,11 +449,17 @@ export const dispatchNotification = async (
         }
 
         const templateKey = policy.template || 'default';
-        const rendered = renderTemplate(templateKey, {
+        const rendered = await renderNotificationEmail(templateKey, {
             title,
             message,
             action,
-            familyName: spaceData.name
+            familyName: spaceData.name,
+            detailRows: options.detailRows,
+            policyOverrides: {
+                email_subject: policy.email_subject,
+                email_intro: policy.email_intro,
+                email_footer: policy.email_footer
+            }
         });
 
         const delivery = {

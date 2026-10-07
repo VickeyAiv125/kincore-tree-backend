@@ -1,5 +1,78 @@
 import { supabase } from '../../config/supabaseClient.js';
 import { logActivity } from '../../utils/logger.js';
+import { sendEmail } from '../../services/emailService.js';
+
+const parseDobValue = (raw) => {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (!s || s.toLowerCase() === 'unknown' || s.toLowerCase() === 'null') return null;
+    const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) {
+        const d = new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3], 12));
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const yearOnly = s.match(/^(\d{4})$/);
+    if (yearOnly) {
+        const d = new Date(Date.UTC(+yearOnly[1], 0, 1, 12));
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slash) {
+        const d = new Date(Date.UTC(+slash[3], +slash[1] - 1, +slash[2], 12));
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const PARENT_ROLES = new Set(['father', 'mother', 'parent']);
+const PARENT_LINKS = new Set(['biological', 'adoptive', 'step-parent', 'foster', 'guardian', 'unknown']);
+
+const encodeParentRelation = (relationship, role) => {
+    const link = PARENT_LINKS.has(relationship) ? relationship : 'biological';
+    const parentRole = PARENT_ROLES.has(role) ? role : 'parent';
+    return `parent:${link}:${parentRole}`;
+};
+
+const assertParentChildDob = ({ role, newDobRaw, targetPerson }) => {
+    const newDob = parseDobValue(newDobRaw);
+    const targetDob = parseDobValue(targetPerson?.date_of_birth || targetPerson?.birth_date);
+    const who = role === 'parent' ? 'Parent' : 'Child';
+
+    if (!newDob) {
+        const err = new Error(`${who} date of birth is required.`);
+        err.status = 400;
+        throw err;
+    }
+
+    const today = new Date();
+    const endOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59);
+    if (newDob.getTime() > endOfToday) {
+        const err = new Error('Date of birth cannot be in the future.');
+        err.status = 400;
+        throw err;
+    }
+
+    if (!targetDob) {
+        const err = new Error(
+            role === 'parent'
+                ? "This person's date of birth is missing. Add it before adding a parent."
+                : "This person's date of birth is missing. Add it before adding a child."
+        );
+        err.status = 400;
+        throw err;
+    }
+    if (role === 'parent' && newDob.getTime() >= targetDob.getTime()) {
+        const err = new Error("Parent date of birth must be earlier than this person's date of birth.");
+        err.status = 400;
+        throw err;
+    }
+    if (role === 'child' && newDob.getTime() <= targetDob.getTime()) {
+        const err = new Error("Child date of birth must be later than this person's date of birth.");
+        err.status = 400;
+        throw err;
+    }
+};
 
 /**
  * Internal Helper: Enforce Branch Governance rules.
@@ -89,7 +162,7 @@ async function handleAdminControlledPending(user, familyRole, family_space_id, r
 async function getTargetPerson(targetPersonId, familySpaceId) {
     const { data, error } = await supabase
         .from('persons')
-        .select('id, family_space_id, clan_tree_id')
+        .select('id, family_space_id, clan_tree_id, date_of_birth, birth_date, first_name, last_name, full_name')
         .eq('id', targetPersonId)
         .eq('family_space_id', familySpaceId)
         .maybeSingle();
@@ -110,6 +183,124 @@ const personEmailField = (email) => {
 };
 
 /**
+ * Email the address entered when adding someone on the family tree.
+ * Uses SMTP notification + Supabase invite/OTP so they can open/claim the profile.
+ */
+async function notifyTreeMemberAddedByEmail({
+    email,
+    firstName,
+    lastName,
+    familySpaceId,
+    personId,
+    relationshipLabel = 'family member',
+}) {
+    const clean = normalizePersonEmail(email);
+    if (!clean) return { sent: false, reason: 'no_email' };
+
+    try {
+        const { data: space } = await supabase
+            .from('family_spaces')
+            .select('id, name, code')
+            .eq('id', familySpaceId)
+            .maybeSingle();
+
+        const familyName = space?.name || 'a Kincore family';
+        const inviteCode = space?.code ? String(space.code).toUpperCase() : '';
+        const webBase = (
+            process.env.LANDING_URL
+            || process.env.INVITE_WEB_BASE_URL
+            || 'https://uat.kincore.com'
+        ).replace(/\/$/, '');
+        const appBase = (
+            process.env.MOBILE_WEB_URL
+            || 'https://uat-app.kincore.com'
+        ).replace(/\/$/, '');
+        const inviteQs = new URLSearchParams({ code: inviteCode || '' });
+        if (clean) inviteQs.set('email', clean);
+        if (firstName) inviteQs.set('first_name', String(firstName).trim());
+        if (lastName) inviteQs.set('last_name', String(lastName).trim());
+        if (personId) inviteQs.set('person_id', String(personId));
+        const joinUrl = inviteCode
+            ? `${webBase}/join.html?${inviteQs.toString()}`
+            : `${webBase}/join.html`;
+        const displayName = `${firstName || ''} ${lastName || ''}`.trim() || 'there';
+
+        const subject = `You've been added to ${familyName} on Kincore`;
+        const { renderTreeInviteEmail } = await import('../../services/emailTemplateService.js');
+        const inviteRendered = await renderTreeInviteEmail({
+            displayName,
+            familyName,
+            relationshipLabel,
+            joinUrl,
+            appBase
+        });
+        const html = inviteRendered.html;
+        const text = inviteRendered.text;
+
+        const mailResult = await sendEmail({ to: clean, subject, html, text });
+
+        // If SMTP notification went out, skip Supabase auth mail to avoid duplicate emails.
+        // Fall back to invite/OTP when SMTP is unavailable or failed.
+        let authInvite = { ok: false, skipped: false };
+        if (mailResult.ok && !mailResult.mocked) {
+            authInvite = { ok: false, skipped: true, reason: 'smtp_sent' };
+        } else {
+            const redirectTo = joinUrl;
+            try {
+                const { error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(clean, {
+                    data: {
+                        first_name: firstName || 'Member',
+                        last_name: lastName || '',
+                        family_space_id: familySpaceId,
+                        person_id: personId || null,
+                    },
+                    redirectTo,
+                });
+                if (inviteErr) {
+                    const { error: otpErr } = await supabase.auth.signInWithOtp({
+                        email: clean,
+                        options: { emailRedirectTo: redirectTo },
+                    });
+                    authInvite = otpErr
+                        ? { ok: false, error: otpErr.message }
+                        : { ok: true, via: 'otp' };
+                } else {
+                    authInvite = { ok: true, via: 'invite' };
+                }
+            } catch (err) {
+                authInvite = { ok: false, error: err.message };
+                console.error('[TREE_ADD] auth invite failed:', err.message);
+            }
+        }
+
+        if (personId) {
+            await supabase.from('persons').update({
+                member_status: 'invitation_pending',
+                email: clean,
+            }).eq('id', personId);
+        }
+
+        console.log('[TREE_ADD] email notify', {
+            to: clean,
+            mailOk: mailResult.ok,
+            mailMocked: mailResult.mocked,
+            authInvite,
+            familySpaceId,
+            personId,
+        });
+
+        return {
+            sent: Boolean(mailResult.ok || authInvite.ok),
+            mailResult,
+            authInvite,
+        };
+    } catch (err) {
+        console.error('[TREE_ADD] notifyTreeMemberAddedByEmail failed:', err.message);
+        return { sent: false, error: err.message };
+    }
+}
+
+/**
  * Add a Parent to a specific target person.
  * Creates a new Person record and a 'parent' relationship edge.
  */
@@ -120,7 +311,8 @@ export const addParent = async (req, res) => {
             family_space_id, target_person_id,
             first_name, last_name, gender, is_alive,
             date_of_birth, place_of_birth, anniversary_date,
-            current_location, avatar_url, branch_id, email
+            current_location, avatar_url, branch_id, email,
+            parent_role, relationship_to_child
         } = req.body;
         const { user, familyRole } = req;
 
@@ -151,6 +343,16 @@ export const addParent = async (req, res) => {
             });
         }
 
+        try {
+            assertParentChildDob({
+                role: 'parent',
+                newDobRaw: date_of_birth,
+                targetPerson,
+            });
+        } catch (dobErr) {
+            return res.status(400).json({ error: dobErr.message, message: dobErr.message });
+        }
+
         // 1. Create the Parent Person
         const { data: parent, error: pError } = await supabase
             .from('persons')
@@ -167,6 +369,7 @@ export const addParent = async (req, res) => {
                 current_location,
                 avatar_url,
                 branch_id: branch_id || null,
+                privacy_mode: 'family',
                 ...personEmailField(email)
             })
             .select()
@@ -182,7 +385,7 @@ export const addParent = async (req, res) => {
                 clan_tree_id: targetPerson.clan_tree_id || null,
                 person_id_1: parent.id, // Source is Parent
                 person_id_2: target_person_id, // Target is Child
-                relation_type: 'parent'
+                relation_type: encodeParentRelation(relationship_to_child, parent_role)
             });
         if (rError) throw rError;
 
@@ -192,7 +395,15 @@ export const addParent = async (req, res) => {
         }
 
         await logActivity(user.id, 'ADD_PARENT', 'persons', parent.id, family_space_id);
-        res.status(201).json(parent);
+        const invite = await notifyTreeMemberAddedByEmail({
+            email,
+            firstName: first_name,
+            lastName: last_name,
+            familySpaceId: family_space_id,
+            personId: parent.id,
+            relationshipLabel: 'parent',
+        });
+        res.status(201).json({ ...parent, invite_email_sent: Boolean(invite?.sent) });
     } catch (err) {
         // Avoid leaving an orphan person when relationship creation fails.
         if (createdParentId) {
@@ -245,6 +456,16 @@ export const addChild = async (req, res) => {
             });
         }
 
+        try {
+            assertParentChildDob({
+                role: 'child',
+                newDobRaw: date_of_birth,
+                targetPerson,
+            });
+        } catch (dobErr) {
+            return res.status(400).json({ error: dobErr.message, message: dobErr.message });
+        }
+
         // 1. Create the Child Person
         const { data: child, error: cError } = await supabase
             .from('persons')
@@ -264,6 +485,7 @@ export const addChild = async (req, res) => {
                 qualification,
                 study_location,
                 branch_id: branch_id || null,
+                privacy_mode: 'family',
                 ...personEmailField(email)
             })
             .select()
@@ -289,7 +511,15 @@ export const addChild = async (req, res) => {
         }
 
         await logActivity(user.id, 'ADD_CHILD', 'persons', child.id, family_space_id);
-        res.status(201).json(child);
+        const invite = await notifyTreeMemberAddedByEmail({
+            email,
+            firstName: first_name,
+            lastName: last_name,
+            familySpaceId: family_space_id,
+            personId: child.id,
+            relationshipLabel: 'child',
+        });
+        res.status(201).json({ ...child, invite_email_sent: Boolean(invite?.sent) });
     } catch (err) {
         if (createdChildId) {
             await supabase.from('persons').delete().eq('id', createdChildId);
@@ -377,6 +607,7 @@ export const addFamilyMember = async (req, res) => {
                     hide_sensitive_details: hide_sensitive_details === 'true' || hide_sensitive_details === true,
                     avatar_url,
                     branch_id: branch_id || null,
+                    privacy_mode: 'family',
                     ...personEmailField(email)
                 })
                 .select()
@@ -417,7 +648,19 @@ export const addFamilyMember = async (req, res) => {
         }
 
         await logActivity(user.id, 'ADD_MEMBER', 'persons', personId, family_space_id);
-        res.status(201).json({ id: personId, message: 'Member added successfully' });
+        const invite = await notifyTreeMemberAddedByEmail({
+            email,
+            firstName: first_name,
+            lastName: last_name,
+            familySpaceId: family_space_id,
+            personId,
+            relationshipLabel: relationship_type || 'family member',
+        });
+        res.status(201).json({
+            id: personId,
+            message: 'Member added successfully',
+            invite_email_sent: Boolean(invite?.sent),
+        });
     } catch (err) {
         if (createdPersonId) {
             await supabase.from('persons').delete().eq('id', createdPersonId);
@@ -722,12 +965,20 @@ export const getTreeData = async (req, res) => {
             .eq('clan_tree_id', allTreeIds[0] || null); // Primary tree search
         
         // Fallback: If no tree ID, search by person IDs in space
-        const { data: relsByPerson } = await supabase
-            .from('person_relations')
-            .select('*')
-            .or(`person_id_1.in.(${allPersonIds.join(',')}),person_id_2.in.(${allPersonIds.join(',')})`);
+        let relsByPerson = [];
+        if (allPersonIds.length > 0) {
+            const { data: relsByPersonRows, error: relsByPersonErr } = await supabase
+                .from('person_relations')
+                .select('*')
+                .or(`person_id_1.in.(${allPersonIds.join(',')}),person_id_2.in.(${allPersonIds.join(',')})`);
+            if (relsByPersonErr) {
+                console.warn('[getTreeData] person_relations by person id failed:', relsByPersonErr.message);
+            } else {
+                relsByPerson = relsByPersonRows || [];
+            }
+        }
 
-        const combinedRels = [...(rels || []), ...(relsByPerson || [])];
+        const combinedRels = [...(rels || []), ...relsByPerson];
         const relIdsSeen = new Set();
         
         normalizedRelations = combinedRels.filter(r => {
@@ -766,7 +1017,7 @@ export const getTreeData = async (req, res) => {
         const childrenMap = new Map();
         if (settings.sensitiveDataRedaction && settings.postMortemAccess) {
             normalizedRelations.forEach(r => {
-                if (r.relationship_type === 'parent' || r.relation_type === 'parent') {
+                if (String(r.relationship_type || r.relation_type || '').toLowerCase().startsWith('parent')) {
                     if (!childrenMap.has(r.person_id)) childrenMap.set(r.person_id, []);
                     childrenMap.get(r.person_id).push(r.related_person_id);
                 }
@@ -798,7 +1049,12 @@ export const getTreeData = async (req, res) => {
                     return; // Skip redaction
                 }
 
-                if (p.date_of_birth) p.date_of_birth = p.date_of_birth.substring(0, 4) + '-01-01'; // Keep only year, fake M/D for standard parsing
+                if (p.date_of_birth != null && p.date_of_birth !== '') {
+                    const dobStr = String(p.date_of_birth);
+                    p.date_of_birth = dobStr.length >= 4
+                        ? `${dobStr.substring(0, 4)}-01-01`
+                        : dobStr;
+                }
                 if (p.latitude) p.latitude = null;
                 if (p.longitude) p.longitude = null;
                 if (p.current_location) p.current_location = '[REDACTED]';
@@ -821,9 +1077,24 @@ export const getTreeData = async (req, res) => {
             'Surrogate-Control': 'no-store'
         });
 
+        // Family space display name for mobile tree chrome
+        let familyName = null;
+        try {
+            const { data: space } = await supabase
+                .from('family_spaces')
+                .select('name')
+                .eq('id', family_space_id)
+                .maybeSingle();
+            familyName = space?.name || null;
+        } catch (_) {
+            familyName = null;
+        }
+
         res.json({
             persons: allPersons,
-            relationships: normalizedRelations
+            relationships: normalizedRelations,
+            family_space_id,
+            family_name: familyName,
         });
 
     } catch (err) {
@@ -918,7 +1189,9 @@ export const getTreeWebviewUrl = async (req, res) => {
         const frontendBase = String(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
         const params = new URLSearchParams({
             view: 'app',
-            token: bearerToken
+            token: bearerToken,
+            // Bust SPA/iframe caches whenever tree is opened in the app
+            _v: String(Date.now()),
         });
         const url = `${frontendBase}/family-tree/webview/${familySpaceId}?${params.toString()}`;
 

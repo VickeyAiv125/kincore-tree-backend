@@ -121,11 +121,11 @@ class ClientApiService {
     // Mall/merchants/disputes/payouts → PlenorHub. Ledger/wallets → BigK Admin API.
 
     getPlenorHubBase() {
-        return (process.env.PLENORHUB_API_BASE || 'https://api.plenorhub.com/api/v1').replace(/\/$/, '');
+        return (process.env.PLENORHUB_API_BASE || 'https://uat-api.plenorhub.com/api/v1').replace(/\/$/, '');
     }
 
     getBigKAdminBase() {
-        return (process.env.BIGK_ADMIN_API_BASE || 'https://api.bigkpay.com/api/v1').replace(/\/$/, '');
+        return (process.env.BIGK_ADMIN_API_BASE || 'https://uat-api.bigkpay.com/api/v1').replace(/\/$/, '');
     }
 
     async getAdminToken() {
@@ -134,7 +134,7 @@ class ClientApiService {
         const identifier = process.env.BIGK_ADMIN_IDENTIFIER || process.env.BIGK_ADMIN_EMAIL || '';
         const password = process.env.BIGK_ADMIN_PASSWORD || '';
         const clientId = process.env.BIGK_ADMIN_CLIENT_ID || 'bigk_admin';
-        const authUrl = process.env.BIGK_AUTH_URL || 'https://auth.bigkpay.com/kccid/v1/login';
+        const authUrl = process.env.BIGK_AUTH_URL || 'https://uat-auth.bigkpay.com/kccid/v1/login';
 
         if (!identifier || !password) {
             this.adminToken = null;

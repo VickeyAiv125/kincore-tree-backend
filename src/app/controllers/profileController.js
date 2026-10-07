@@ -95,101 +95,208 @@ async function getRelatives(personId, spaceId) {
     return relatives;
 }
 
+const synthesizePersonLifeEvents = (personDetails) => {
+    const events = [];
+    if (!personDetails) return events;
+
+    const birth = personDetails.date_of_birth || personDetails.birth_date;
+    if (birth) {
+        events.push({
+            id: `birth-${personDetails.id}`,
+            year: new Date(birth).getFullYear(),
+            title: 'Born',
+            description: personDetails.place_of_birth
+                ? `Born in ${personDetails.place_of_birth}`
+                : 'Birth event',
+            start_date: birth
+        });
+    }
+    if (personDetails.anniversary_date) {
+        events.push({
+            id: `marriage-${personDetails.id}`,
+            year: new Date(personDetails.anniversary_date).getFullYear(),
+            title: 'Marriage',
+            description: 'Married to spouse',
+            start_date: personDetails.anniversary_date
+        });
+    }
+    if (personDetails.death_date && personDetails.is_alive === false) {
+        events.push({
+            id: `death-${personDetails.id}`,
+            year: new Date(personDetails.death_date).getFullYear(),
+            title: 'Passed Away',
+            description: 'Death event',
+            start_date: personDetails.death_date
+        });
+    }
+    return events;
+};
+
+const assertSpaceMember = async (userId, spaceId) => {
+    if (!spaceId) return true;
+    const { data } = await supabase
+        .from('family_memberships')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('family_space_id', spaceId)
+        .maybeSingle();
+    return Boolean(data);
+};
+
 /**
- * Get the current user's profile with family members and events
+ * Get profile for the current user, or another member via person_id / user_id.
  * GET /api/app/profile
+ * GET /api/app/profile?person_id=<uuid>
+ * GET /api/app/profile?user_id=<uuid>
+ * Header: x-family-space-id (required when viewing another member)
  */
 export const getProfile = async (req, res) => {
     try {
-        const userId = req.user.id;
-        const spaceId = req.headers['x-family-space-id'];
+        const viewerId = req.user.id;
+        const spaceId = req.headers['x-family-space-id'] || req.query.family_space_id || null;
+        const queryPersonId = (req.query.person_id || '').toString().trim() || null;
+        const queryUserId = (req.query.user_id || '').toString().trim() || null;
 
-        // 1. Get Base User Info
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select(PROFILE_USER_COLUMNS)
-            .eq('id', userId)
-            .single();
+        let targetUserId = viewerId;
+        let targetPersonId = null;
+        let personRow = null;
+        let isOwnProfile = true;
 
-        if (userError) throw userError;
+        if (queryPersonId || queryUserId) {
+            if (!spaceId) {
+                return res.status(400).json({
+                    error: 'family_space_id (header x-family-space-id) is required to view another member'
+                });
+            }
 
-        // 2. Count memberships
-        const { count: spaceCount } = await supabase
-            .from('family_memberships')
-            .select('*', { count: 'exact', head: true })
-            .eq('user_id', userId);
+            const viewerOk = await assertSpaceMember(viewerId, spaceId);
+            if (!viewerOk) {
+                return res.status(403).json({ error: 'You are not a member of this family space' });
+            }
 
-        // 3. Find if user claimed a person in this space
-        let relatives = [];
-        let claimedPerson = null;
-        if (spaceId) {
+            if (queryPersonId) {
+                const { data: person, error: personError } = await supabase
+                    .from('persons')
+                    .select('*')
+                    .eq('id', queryPersonId)
+                    .eq('family_space_id', spaceId)
+                    .maybeSingle();
+
+                if (personError) throw personError;
+                if (!person) {
+                    return res.status(404).json({ error: 'Member not found in this family space' });
+                }
+
+                personRow = person;
+                targetPersonId = person.id;
+                targetUserId = person.claimed_by || null;
+                isOwnProfile = Boolean(targetUserId && targetUserId === viewerId);
+            } else {
+                targetUserId = queryUserId;
+                isOwnProfile = targetUserId === viewerId;
+
+                const { data: claimed } = await supabase
+                    .from('persons')
+                    .select('*')
+                    .eq('claimed_by', targetUserId)
+                    .eq('family_space_id', spaceId)
+                    .maybeSingle();
+
+                personRow = claimed || null;
+                targetPersonId = claimed?.id || null;
+
+                // Target must belong to this space (membership or claimed person)
+                const targetOk = await assertSpaceMember(targetUserId, spaceId);
+                if (!targetOk && !personRow) {
+                    return res.status(404).json({ error: 'User is not part of this family space' });
+                }
+            }
+        } else if (spaceId) {
             const { data } = await supabase
                 .from('persons')
-                .select('id, full_name')
-                .eq('claimed_by', userId)
+                .select('*')
+                .eq('claimed_by', viewerId)
                 .eq('family_space_id', spaceId)
                 .maybeSingle();
+            personRow = data || null;
+            targetPersonId = data?.id || null;
+        }
 
-            claimedPerson = data;
+        // Privacy for other profiles
+        let isProfileLocked = false;
+        let visibility = 'family';
+        if (!isOwnProfile && targetUserId) {
+            const { data: privacy } = await supabase
+                .from('user_privacy_settings')
+                .select('search_visibility, is_profile_locked')
+                .eq('user_id', targetUserId)
+                .maybeSingle();
+            visibility = privacy?.search_visibility || 'family';
+            // Locked only for explicit private / admin-only; family members can view within the space
+            isProfileLocked = Boolean(
+                privacy?.is_profile_locked
+                || visibility === 'private'
+                || visibility === 'admin'
+            );
+        }
 
-            if (claimedPerson) {
-                relatives = await getRelatives(claimedPerson.id, spaceId);
-            }
+        let user = null;
+        if (targetUserId) {
+            const { data: userRow, error: userError } = await supabase
+                .from('users')
+                .select(PROFILE_USER_COLUMNS)
+                .eq('id', targetUserId)
+                .maybeSingle();
+            if (userError) throw userError;
+            user = userRow;
+        }
+
+        const { count: spaceCount } = targetUserId
+            ? await supabase
+                .from('family_memberships')
+                .select('*', { count: 'exact', head: true })
+                .eq('user_id', targetUserId)
+            : { count: 0 };
+
+        let relatives = [];
+        if (targetPersonId && spaceId) {
+            relatives = await getRelatives(targetPersonId, spaceId);
         }
 
         let events = [];
         if (spaceId) {
-            const { data: userEvents } = await supabase
-                .from('events')
-                .select('*')
-                .eq('family_space_id', spaceId)
-                .eq('creator_id', userId)
-                .order('start_date', { ascending: true });
-            
-            // Map regular events
-            const timelineEvents = (userEvents || []).map(e => ({
-                id: e.id,
-                year: e.start_date ? new Date(e.start_date).getFullYear() : 'Unknown',
-                title: e.title,
-                description: e.description,
-                start_date: e.start_date
-            }));
+            const timelineEvents = [];
 
-            // If user claimed a person, synthensize life events
-            if (claimedPerson) {
-                const { data: personDetails } = await supabase.from('persons').select('*').eq('id', claimedPerson.id).single();
-                if (personDetails) {
-                    if (personDetails.date_of_birth) {
-                        timelineEvents.push({
-                            id: `birth-${personDetails.id}`,
-                            year: new Date(personDetails.date_of_birth).getFullYear(),
-                            title: 'Born',
-                            description: personDetails.place_of_birth ? `Born in ${personDetails.place_of_birth}` : 'Birth event',
-                            start_date: personDetails.date_of_birth
-                        });
-                    }
-                    if (personDetails.anniversary_date) {
-                        timelineEvents.push({
-                            id: `marriage-${personDetails.id}`,
-                            year: new Date(personDetails.anniversary_date).getFullYear(),
-                            title: 'Marriage',
-                            description: 'Married to spouse',
-                            start_date: personDetails.anniversary_date
-                        });
-                    }
-                    if (personDetails.death_date && !personDetails.is_alive) {
-                        timelineEvents.push({
-                            id: `death-${personDetails.id}`,
-                            year: new Date(personDetails.death_date).getFullYear(),
-                            title: 'Passed Away',
-                            description: 'Death event',
-                            start_date: personDetails.death_date
-                        });
-                    }
+            if (targetUserId) {
+                const { data: userEvents } = await supabase
+                    .from('events')
+                    .select('*')
+                    .eq('family_space_id', spaceId)
+                    .eq('creator_id', targetUserId)
+                    .order('start_date', { ascending: true });
+
+                for (const e of userEvents || []) {
+                    timelineEvents.push({
+                        id: e.id,
+                        year: e.start_date ? new Date(e.start_date).getFullYear() : 'Unknown',
+                        title: e.title,
+                        description: e.description,
+                        start_date: e.start_date
+                    });
                 }
             }
 
-            // Sort merged timeline
+            if (personRow) {
+                timelineEvents.push(...synthesizePersonLifeEvents(personRow));
+            } else if (targetPersonId) {
+                const { data: personDetails } = await supabase
+                    .from('persons')
+                    .select('*')
+                    .eq('id', targetPersonId)
+                    .maybeSingle();
+                timelineEvents.push(...synthesizePersonLifeEvents(personDetails));
+            }
+
             events = timelineEvents.sort((a, b) => {
                 if (!a.start_date) return 1;
                 if (!b.start_date) return -1;
@@ -197,36 +304,66 @@ export const getProfile = async (req, res) => {
             });
         }
 
-        const fullName = user.first_name || user.last_name ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : 'Unknown';
+        // Prefer user profile fields; fall back to tree person for unclaimed members
+        const personFullName = personRow
+            ? (personRow.full_name
+                || `${personRow.first_name || ''} ${personRow.last_name || ''}`.trim()
+                || null)
+            : null;
+        const userFullName = user
+            ? (`${user.first_name || ''} ${user.last_name || ''}`.trim() || null)
+            : null;
+        const fullName = userFullName || personFullName || 'Unknown';
+
+        const dateOfBirth = user?.date_of_birth
+            || personRow?.date_of_birth
+            || personRow?.birth_date
+            || null;
+        const placeOfBirth = user?.place_of_birth || personRow?.place_of_birth || null;
+        const occupation = user?.occupation || personRow?.occupation || null;
+        const bio = user?.bio || personRow?.bio || null;
+        const avatarUrl = user?.avatar_url || personRow?.avatar_url || null;
+        const companyLinks = user ? pickCompanyLinks(user) : pickCompanyLinks({});
+
+        const hidePrivate = !isOwnProfile && isProfileLocked;
 
         res.json({
+            is_own_profile: isOwnProfile,
+            is_profile_locked: isProfileLocked,
+            visibility,
+            user_id: targetUserId,
+            person_id: targetPersonId,
+            claimed: Boolean(targetUserId),
             profile: {
                 full_name: fullName,
-                avatar_url: user.avatar_url,
-                bio: user.bio,
-                date_of_birth: user.date_of_birth,
-                place_of_birth: user.place_of_birth,
-                occupation: user.occupation,
+                avatar_url: avatarUrl,
+                bio: hidePrivate ? null : bio,
+                date_of_birth: hidePrivate ? null : dateOfBirth,
+                place_of_birth: hidePrivate ? null : placeOfBirth,
+                occupation: hidePrivate ? null : occupation,
                 spaces_count: spaceCount || 0,
-                ...pickCompanyLinks(user)
+                ...(hidePrivate ? {} : companyLinks)
             },
-            company_links: pickCompanyLinks(user),
-            vital_statistics: {
-                full_name: fullName,
-                born: user.date_of_birth,
-                location: user.place_of_birth,
-                occupation: user.occupation,
-                ...pickCompanyLinks(user)
-            },
+            company_links: hidePrivate ? pickCompanyLinks({}) : companyLinks,
+            vital_statistics: hidePrivate
+                ? null
+                : {
+                    full_name: fullName,
+                    born: dateOfBirth,
+                    location: placeOfBirth,
+                    occupation,
+                    ...companyLinks
+                },
             family_members: relatives.map(r => ({
                 id: r.id,
-                name: r.full_name || `${r.first_name} ${r.last_name}`.trim(),
+                name: r.full_name || `${r.first_name || ''} ${r.last_name || ''}`.trim(),
                 relation: r.relationToMe,
-                avatar_url: r.avatar_url
+                avatar_url: r.avatar_url,
+                claimed_by: r.claimed_by || null,
+                user_id: r.claimed_by || null
             })),
-            key_life_events: events
+            key_life_events: hidePrivate ? [] : events
         });
-
     } catch (err) {
         console.error('[getProfile] Error:', err);
         res.status(500).json({ error: 'Internal server error fetching profile' });

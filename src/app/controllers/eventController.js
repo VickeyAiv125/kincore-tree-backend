@@ -8,7 +8,7 @@ import { supabase } from '../../config/supabaseClient.js';
  */
 export const getEvents = async (req, res) => {
     try {
-        const { family_space_id, filter, search } = req.query;
+        const { family_space_id, filter, search, type } = req.query;
         const { user } = req;
 
         if (!family_space_id) return res.status(400).json({ error: 'family_space_id is required' });
@@ -17,6 +17,7 @@ export const getEvents = async (req, res) => {
             familyId: family_space_id,
             filter,
             search,
+            type,
             userId: user.id
         });
 
