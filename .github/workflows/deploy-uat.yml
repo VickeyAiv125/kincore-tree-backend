@@ -22,13 +22,14 @@ jobs:
           chmod 600 ~/.ssh/uat_key
           ssh-keyscan -p "${{ secrets.UAT_SSH_PORT || 22 }}" -H "${{ secrets.UAT_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Rsync API code (keep server .env)
+      - name: Deploy API into Coolify container (nginx proxies :8112)
         env:
           HOST: ${{ secrets.UAT_HOST }}
           USER: ${{ secrets.UAT_USER }}
           PORT: ${{ secrets.UAT_SSH_PORT || 22 }}
         run: |
-          rsync -avz --delete \
+          ssh -i ~/.ssh/uat_key -p "${PORT}" -o IdentitiesOnly=yes "${USER}@${HOST}" 'mkdir -p /tmp/kincore-api-src'
+          rsync -az --delete \
             -e "ssh -i ~/.ssh/uat_key -p ${PORT} -o IdentitiesOnly=yes" \
             --exclude '.git/' \
             --exclude '.github/' \
@@ -37,19 +38,18 @@ jobs:
             --exclude '.env.*' \
             --exclude 'uploads/' \
             --exclude 'coverage/' \
-            ./ "${USER}@${HOST}:/opt/kincore/backend/"
-
-      - name: Install deps & restart PM2
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.UAT_HOST }}
-          username: ${{ secrets.UAT_USER }}
-          key: ${{ secrets.UAT_SSH_KEY }}
-          port: ${{ secrets.UAT_SSH_PORT || 22 }}
-          script: |
+            ./ "${USER}@${HOST}:/tmp/kincore-api-src/"
+          ssh -i ~/.ssh/uat_key -p "${PORT}" -o IdentitiesOnly=yes "${USER}@${HOST}" 'bash -s' << 'EOF'
             set -e
-            cd /opt/kincore/backend
-            npm ci --omit=dev
-            pm2 restart kincore-api --update-env || pm2 start index.js --name kincore-api
-            pm2 save
-            curl -fsS http://127.0.0.1:5000/health || curl -fsS http://127.0.0.1:3000/health || true
+            CONTAINER=$(docker ps --filter publish=8112 --format "{{.Names}}" | head -1)
+            if [ -z "$CONTAINER" ]; then
+              echo "No container publishing host port 8112 (uat-api proxy target)" >&2
+              exit 1
+            fi
+            docker cp /tmp/kincore-api-src/. "${CONTAINER}:/app/"
+            docker exec "$CONTAINER" npm ci --omit=dev
+            docker restart "$CONTAINER"
+            sleep 4
+            curl -fsS http://127.0.0.1:8112/health
+            echo
+          EOF
