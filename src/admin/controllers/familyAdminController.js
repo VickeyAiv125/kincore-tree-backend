@@ -10,6 +10,7 @@ import {
     canManageFamilyRoles
 } from '../../utils/familyRolePolicy.js';
 import { loadFamilyKccLedger, summarizeKccRows } from '../../utils/familyKccLedger.js';
+import { assertParentChildDob } from '../../shared/utils/parentChildDob.js';
 
 const ADMIN_ROLES = ['owner', 'admin', 'manager', 'editor', 'branch', 'branch-admin', 'family', 'family-admin', 'family_admin', 'co-admin'];
 const OWNER_ROLES = ['owner'];
@@ -2147,6 +2148,23 @@ export const resolveFamilyAdminBranchApproval = async (req, res) => {
                     target_person_id, relationship_type, link_existing_id,
                     ...personData
                 } = request.proposed_value;
+
+                if (request.request_type === 'add_parent' || request.request_type === 'add_child') {
+                    const { data: targetPerson } = await supabase
+                        .from('persons')
+                        .select('id, first_name, last_name, full_name, date_of_birth, birth_date')
+                        .eq('id', target_person_id)
+                        .maybeSingle();
+                    try {
+                        assertParentChildDob({
+                            role: request.request_type === 'add_parent' ? 'parent' : 'child',
+                            newDobRaw: request.proposed_value?.date_of_birth,
+                            targetPerson,
+                        });
+                    } catch (dobErr) {
+                        return res.status(400).json({ error: dobErr.message, message: dobErr.message });
+                    }
+                }
 
                 // Strip fields that shouldn't go to persons table directly
                 const cleanPersonData = { ...personData };

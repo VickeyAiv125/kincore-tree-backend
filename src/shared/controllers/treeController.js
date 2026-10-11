@@ -1,29 +1,7 @@
 import { supabase } from '../../config/supabaseClient.js';
 import { logActivity } from '../../utils/logger.js';
 import { sendEmail } from '../../services/emailService.js';
-
-const parseDobValue = (raw) => {
-    if (!raw) return null;
-    const s = String(raw).trim();
-    if (!s || s.toLowerCase() === 'unknown' || s.toLowerCase() === 'null') return null;
-    const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (iso) {
-        const d = new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3], 12));
-        return Number.isNaN(d.getTime()) ? null : d;
-    }
-    const yearOnly = s.match(/^(\d{4})$/);
-    if (yearOnly) {
-        const d = new Date(Date.UTC(+yearOnly[1], 0, 1, 12));
-        return Number.isNaN(d.getTime()) ? null : d;
-    }
-    const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (slash) {
-        const d = new Date(Date.UTC(+slash[3], +slash[1] - 1, +slash[2], 12));
-        return Number.isNaN(d.getTime()) ? null : d;
-    }
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? null : d;
-};
+import { assertParentChildDob } from '../utils/parentChildDob.js';
 
 const PARENT_ROLES = new Set(['father', 'mother', 'parent']);
 const PARENT_LINKS = new Set(['biological', 'adoptive', 'step-parent', 'foster', 'guardian', 'unknown']);
@@ -34,43 +12,13 @@ const encodeParentRelation = (relationship, role) => {
     return `parent:${link}:${parentRole}`;
 };
 
-const assertParentChildDob = ({ role, newDobRaw, targetPerson }) => {
-    const newDob = parseDobValue(newDobRaw);
-    const targetDob = parseDobValue(targetPerson?.date_of_birth || targetPerson?.birth_date);
-    const who = role === 'parent' ? 'Parent' : 'Child';
-
-    if (!newDob) {
-        const err = new Error(`${who} date of birth is required.`);
-        err.status = 400;
-        throw err;
-    }
-
-    const today = new Date();
-    const endOfToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 23, 59, 59);
-    if (newDob.getTime() > endOfToday) {
-        const err = new Error('Date of birth cannot be in the future.');
-        err.status = 400;
-        throw err;
-    }
-
-    if (!targetDob) {
-        const err = new Error(
-            role === 'parent'
-                ? "This person's date of birth is missing. Add it before adding a parent."
-                : "This person's date of birth is missing. Add it before adding a child."
-        );
-        err.status = 400;
-        throw err;
-    }
-    if (role === 'parent' && newDob.getTime() >= targetDob.getTime()) {
-        const err = new Error("Parent date of birth must be earlier than this person's date of birth.");
-        err.status = 400;
-        throw err;
-    }
-    if (role === 'child' && newDob.getTime() <= targetDob.getTime()) {
-        const err = new Error("Child date of birth must be later than this person's date of birth.");
-        err.status = 400;
-        throw err;
+const rejectInvalidRelationDob = (res, role, newDobRaw, targetPerson) => {
+    try {
+        assertParentChildDob({ role, newDobRaw, targetPerson });
+        return false;
+    } catch (dobErr) {
+        res.status(dobErr.status || 400).json({ error: dobErr.message, message: dobErr.message });
+        return true;
     }
 };
 
@@ -316,20 +264,6 @@ export const addParent = async (req, res) => {
         } = req.body;
         const { user, familyRole } = req;
 
-        // Enforce Governance
-        if (branch_id) {
-            await checkBranchGovernance(branch_id, user.id, familyRole, 'ADD_MEMBER');
-        }
-
-        // Global Governance Intercept
-        const governance = await handleAdminControlledPending(user, familyRole, family_space_id, 'add_parent', req.body);
-        if (governance?.blocked) {
-            return res.status(400).json({ error: governance.message, message: governance.message });
-        }
-        if (governance?.intercepted) {
-            return res.status(202).json({ message: `Request sent to ${governance.target} for approval.` });
-        }
-
         if (!family_space_id || !target_person_id || !first_name) {
             return res.status(400).json({
                 error: 'family_space_id, target_person_id, and first_name are required'
@@ -343,14 +277,21 @@ export const addParent = async (req, res) => {
             });
         }
 
-        try {
-            assertParentChildDob({
-                role: 'parent',
-                newDobRaw: date_of_birth,
-                targetPerson,
-            });
-        } catch (dobErr) {
-            return res.status(400).json({ error: dobErr.message, message: dobErr.message });
+        // Reject an impossible birth date before governance can store the request.
+        if (rejectInvalidRelationDob(res, 'parent', date_of_birth, targetPerson)) return;
+
+        // Enforce Governance
+        if (branch_id) {
+            await checkBranchGovernance(branch_id, user.id, familyRole, 'ADD_MEMBER');
+        }
+
+        // Global Governance Intercept
+        const governance = await handleAdminControlledPending(user, familyRole, family_space_id, 'add_parent', req.body);
+        if (governance?.blocked) {
+            return res.status(400).json({ error: governance.message, message: governance.message });
+        }
+        if (governance?.intercepted) {
+            return res.status(202).json({ message: `Request sent to ${governance.target} for approval.` });
         }
 
         // 1. Create the Parent Person
@@ -429,20 +370,6 @@ export const addChild = async (req, res) => {
         } = req.body;
         const { user, familyRole } = req;
 
-        // Enforce Governance
-        if (branch_id) {
-            await checkBranchGovernance(branch_id, user.id, familyRole, 'ADD_MEMBER');
-        }
-
-        // Global Governance Intercept
-        const governance = await handleAdminControlledPending(user, familyRole, family_space_id, 'add_child', req.body);
-        if (governance?.blocked) {
-            return res.status(400).json({ error: governance.message, message: governance.message });
-        }
-        if (governance?.intercepted) {
-            return res.status(202).json({ message: `Request sent to ${governance.target} for approval.` });
-        }
-
         if (!family_space_id || !target_person_id || !first_name) {
             return res.status(400).json({
                 error: 'family_space_id, target_person_id, and first_name are required'
@@ -456,14 +383,21 @@ export const addChild = async (req, res) => {
             });
         }
 
-        try {
-            assertParentChildDob({
-                role: 'child',
-                newDobRaw: date_of_birth,
-                targetPerson,
-            });
-        } catch (dobErr) {
-            return res.status(400).json({ error: dobErr.message, message: dobErr.message });
+        // Reject an impossible birth date before governance can store the request.
+        if (rejectInvalidRelationDob(res, 'child', date_of_birth, targetPerson)) return;
+
+        // Enforce Governance
+        if (branch_id) {
+            await checkBranchGovernance(branch_id, user.id, familyRole, 'ADD_MEMBER');
+        }
+
+        // Global Governance Intercept
+        const governance = await handleAdminControlledPending(user, familyRole, family_space_id, 'add_child', req.body);
+        if (governance?.blocked) {
+            return res.status(400).json({ error: governance.message, message: governance.message });
+        }
+        if (governance?.intercepted) {
+            return res.status(202).json({ message: `Request sent to ${governance.target} for approval.` });
         }
 
         // 1. Create the Child Person
