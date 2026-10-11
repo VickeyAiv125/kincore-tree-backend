@@ -571,7 +571,19 @@ export const AuthService = {
 
         const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
 
-        if (error) throw error;
+        if (error) {
+            // A KCC handler is not a local password. Sign that account in through KCC ID.
+            const typed = String(identifier || email || '').trim();
+            if (typed && !typed.includes('@')) {
+                const { loginWithKccId } = await import('./kccAuthService.js');
+                return loginWithKccId({
+                    identifier: cleanEmail.includes('@') ? cleanEmail : typed,
+                    password,
+                    skipLocalFallback: true,
+                });
+            }
+            throw error;
+        }
 
         const userId = data.user.id;
         const useCols = await usersHaveOtpColumns();

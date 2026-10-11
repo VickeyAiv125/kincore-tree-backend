@@ -18,32 +18,74 @@ const firstText = (...values) => {
     return '';
 };
 
-/** KCC ID username. Userinfo uses `handler`; older payloads use handle / preferred_username. */
-const readKccHandler = (info, typedId) => {
-    const bags = [info, info?.user, info?.data, info?.profile].filter((bag) => bag && typeof bag === 'object');
-    for (const bag of bags) {
-        const handler = firstText(
-            bag.handler,
-            bag.handle,
-            bag.wallet_handle,
-            bag.preferred_username,
-            bag.username,
-            bag.kcc_id,
-            bag.kccid
-        );
-        if (handler && !handler.includes('@') && !handler.includes(' ')) return handler;
-    }
-    if (typedId && !typedId.includes('@') && !typedId.includes(' ')) return typedId;
-    return '';
+const HANDLER_KEYS = ['handler', 'handle', 'wallet_handle', 'preferred_username', 'username', 'kcc_id', 'kccid', 'kcc_handler', 'user_handle'];
+
+/** A KCC handler is a username, never an email. A leading @ is optional. */
+const normalizeHandler = (value) => {
+    const clean = trim(value).replace(/^@+/, '');
+    if (!clean || clean.includes('@') || /\s/.test(clean)) return '';
+    return clean;
 };
 
-const readKccEmail = (info, typedId) => {
-    const bags = [info, info?.user, info?.data, info?.profile].filter((bag) => bag && typeof bag === 'object');
-    for (const bag of bags) {
+const decodeJwtPayload = (token) => {
+    try {
+        const part = String(token || '').split('.')[1];
+        if (!part) return null;
+        const parsed = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+};
+
+const flattenBags = (roots) => {
+    const bags = [];
+    const visit = (node, depth) => {
+        if (!node || typeof node !== 'object' || depth > 3 || bags.includes(node)) return;
+        bags.push(node);
+        for (const value of Object.values(node)) {
+            if (value && typeof value === 'object' && !Array.isArray(value)) visit(value, depth + 1);
+        }
+    };
+    for (const root of roots) visit(root, 0);
+    return bags;
+};
+
+/** KCC ID username. Userinfo and the ID token use `handler`; older payloads use handle / preferred_username. */
+const readKccHandler = (roots, typedId) => {
+    for (const bag of flattenBags(roots)) {
+        for (const key of HANDLER_KEYS) {
+            const handler = normalizeHandler(bag[key]);
+            if (handler) return handler;
+        }
+    }
+    return normalizeHandler(typedId);
+};
+
+const readKccEmail = (roots, typedId) => {
+    for (const bag of flattenBags(roots)) {
         const email = firstText(bag.email, bag.email_address).toLowerCase();
         if (email.includes('@')) return email;
     }
-    return typedId.includes('@') ? typedId.toLowerCase() : '';
+    const typed = trim(typedId).toLowerCase();
+    return typed.includes('@') ? typed : '';
+};
+
+const resolveStoredEmail = async (handler) => {
+    const handle = normalizeHandler(handler).toLowerCase();
+    if (!handle) return '';
+    const { supabase } = await import('../config/supabaseClient.js');
+    const { data, error } = await supabase
+        .from('users')
+        .select('email')
+        .ilike('wallet_handle', handle)
+        .maybeSingle();
+    if (error) {
+        console.warn('[KCC_LOGIN] handler lookup skipped:', error.message);
+        return '';
+    }
+    const email = trim(data?.email).toLowerCase();
+    return email.includes('@') ? email : '';
 };
 
 export const getKccClientConfig = () => {
@@ -64,18 +106,41 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
 
     const { baseUrl, clientId } = getKccClientConfig();
 
-    const loginRes = await fetch(`${baseUrl}/kccid/v1/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-            identifier: cleanId,
-            password: cleanPass,
-            client_id: clientId,
-            scope: 'openid profile email'
-        })
-    });
+    const postKccLogin = async (idForKcc) => {
+        const res = await fetch(`${baseUrl}/kccid/v1/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({
+                identifier: idForKcc,
+                password: cleanPass,
+                client_id: clientId,
+                scope: 'openid profile email'
+            })
+        });
+        const data = await res.json().catch(() => ({}));
+        return { res, data };
+    };
 
-    const loginData = await loginRes.json().catch(() => ({}));
+    // KCC ID login accepts an email. A handler (for example skker) is resolved to the
+    // email saved from a previous KCC userinfo response, then sent as the identifier.
+    const attempts = [cleanId];
+    const mappedEmail = cleanId.includes('@') ? '' : await resolveStoredEmail(cleanId);
+    if (mappedEmail && mappedEmail !== cleanId.toLowerCase()) attempts.push(mappedEmail);
+
+    let loginRes;
+    let loginData = {};
+    let usedIdentifier = cleanId;
+    for (const candidate of attempts) {
+        const attempt = await postKccLogin(candidate);
+        loginRes = attempt.res;
+        loginData = attempt.data;
+        usedIdentifier = candidate;
+        if (loginRes.ok || loginRes.status === 429) break;
+        if (candidate !== cleanId) {
+            console.log('[KCC_LOGIN] handler was not accepted, retried with the stored email');
+        }
+    }
+
     if (!loginRes.ok) {
         // Local Kincore admins (auditor@admin.com, etc.) are not KCC ID users.
         // If ecosystem login fails, try the same email/password on Kincore.
@@ -120,43 +185,45 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
         throw new Error('KCC ID did not return an access token');
     }
 
-    let profile = {
-        sub: null,
-        email: cleanId.includes('@') ? cleanId.toLowerCase() : '',
-        handler: readKccHandler(null, cleanId),
-        emailVerified: true,
-        firstName: '',
-        lastName: '',
-        fullName: '',
-        avatarUrl: null,
-        provider: 'kcc'
+    const tokenClaims = {
+        ...(decodeJwtPayload(accessToken) || {}),
+        ...(decodeJwtPayload(loginData.id_token) || {})
     };
+    let info = null;
 
     try {
         const infoRes = await fetch(`${baseUrl}/kccid/v1/userinfo`, {
             headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
         });
-        if (infoRes.ok) {
-            const info = await infoRes.json();
-            const name = firstText(info.name, info.full_name, info.preferred_username, profile.handler);
-            const parts = String(name).trim().split(/\s+/).filter(Boolean);
-            profile = {
-                sub: info.sub || info.id || null,
-                email: readKccEmail(info, cleanId),
-                handler: readKccHandler(info, cleanId),
-                emailVerified: info.email_verified !== false,
-                firstName: firstText(info.given_name, info.first_name, parts[0]),
-                lastName: firstText(info.family_name, info.last_name, parts.slice(1).join(' ')),
-                fullName: name,
-                avatarUrl: info.picture || info.avatar_url || null,
-                provider: 'kcc',
-                wallet_id: info.wallet_id || null,
-                kcc_role: info.role || null
-            };
-        }
+        if (infoRes.ok) info = await infoRes.json();
     } catch (e) {
         console.warn('[KCC_LOGIN] userinfo failed, continuing with identifier:', e.message);
     }
+
+    const sources = [tokenClaims, loginData.user, loginData.profile, info].filter(Boolean);
+    const handler = readKccHandler(sources, cleanId);
+    const email = readKccEmail(sources, usedIdentifier) || mappedEmail;
+    const name = firstText(
+        info?.name,
+        info?.full_name,
+        tokenClaims.name,
+        tokenClaims.preferred_username,
+        handler
+    );
+    const parts = String(name).trim().split(/\s+/).filter(Boolean);
+    const profile = {
+        sub: firstText(info?.sub, info?.id, tokenClaims.sub) || null,
+        email,
+        handler,
+        emailVerified: info?.email_verified !== false && tokenClaims.email_verified !== false,
+        firstName: firstText(info?.given_name, info?.first_name, tokenClaims.given_name, parts[0]),
+        lastName: firstText(info?.family_name, info?.last_name, tokenClaims.family_name, parts.slice(1).join(' ')),
+        fullName: name,
+        avatarUrl: info?.picture || info?.avatar_url || tokenClaims.picture || null,
+        provider: 'kcc',
+        wallet_id: info?.wallet_id || tokenClaims.wallet_id || null,
+        kcc_role: info?.role || tokenClaims.role || null
+    };
 
     if (!profile.email || !profile.email.includes('@')) {
         throw new Error('KCC ID account has no email. Use an email-linked KCC account.');
