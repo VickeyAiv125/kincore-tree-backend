@@ -18,6 +18,7 @@ import {
     googleAuthStatus,
     facebookAuthStart,
     facebookAuthCallback,
+    facebookContinue,
     facebookAuthStatus,
     oauthHandoff,
     kccLogin,
@@ -42,6 +43,7 @@ router.get('/google/status', googleAuthStatus);
 // Facebook / Meta SSO (signup + login)
 router.get('/facebook', facebookAuthStart);
 router.get('/facebook/callback', facebookAuthCallback);
+router.post('/facebook/continue', facebookContinue);
 router.get('/facebook/status', facebookAuthStatus);
 
 // KCC ID (ecosystem passport) — credential login with client_id=kincore

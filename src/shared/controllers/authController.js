@@ -14,7 +14,8 @@ import {
     createFacebookOAuthState,
     exchangeFacebookCode,
     getFacebookClientConfig,
-    ensureUserFromSocialProfile
+    beginFacebookSignIn,
+    continueFacebookSignIn
 } from '../../services/facebookAuthService.js';
 import { getKccClientConfig, loginWithKccId } from '../../services/kccAuthService.js';
 import {
@@ -248,20 +249,21 @@ export const facebookAuthCallback = async (req, res) => {
         }
 
         const { profile } = await exchangeFacebookCode(codeStr);
-        await ensureUserFromSocialProfile(profile);
-        const session = await createSessionForEmail(profile.email);
-
-        const result = await AuthService.oauthLogin({
-            access_token: session.access_token,
-            provider: 'facebook',
-            client_type: clientType === 'app' ? 'app' : 'web',
-            allow_signup: true
+        const outcome = await beginFacebookSignIn({
+            profile,
+            clientType,
+            redirectTo,
+            code: codeStr
         });
+        if (outcome.kind === 'html') {
+            res.set('Cache-Control', 'no-store');
+            return res.type('html').send(outcome.html);
+        }
 
         return res.redirect(finishOAuthCallbackRedirect({
             clientType,
             redirectTo,
-            token: result.token,
+            token: outcome.token,
             provider: 'facebook',
             code: codeStr
         }));
@@ -272,6 +274,27 @@ export const facebookAuthCallback = async (req, res) => {
             redirectTo,
             error: oauthRedirectErrorMessage(err, 'Facebook sign-in failed')
         }));
+    }
+};
+
+/** POST /auth/facebook/continue — link, register, or verify email after Facebook. */
+export const facebookContinue = async (req, res) => {
+    try {
+        const outcome = await continueFacebookSignIn(req.body || {});
+        if (outcome.kind === 'html') {
+            res.set('Cache-Control', 'no-store');
+            return res.type('html').send(outcome.html);
+        }
+        return res.redirect(finishOAuthCallbackRedirect({
+            clientType: outcome.clientType,
+            redirectTo: outcome.redirectTo,
+            token: outcome.token,
+            provider: 'facebook',
+            code: outcome.code
+        }));
+    } catch (err) {
+        console.error('[FACEBOOK_CONTINUE]', err);
+        res.status(400).type('html').send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><p>${String(err.message || 'Facebook sign-in failed').replace(/[&<>]/g, '')}</p>`);
     }
 };
 
