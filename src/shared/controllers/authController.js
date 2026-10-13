@@ -444,7 +444,7 @@ export const webForgotPassword = async (req, res) => {
 export const appForgotPassword = async (req, res) => {
     try {
         await AuthService.appForgotPassword(req.body);
-        res.json({ message: '6-digit OTP code sent to your email.' });
+        res.json({ message: 'Password reset link sent to your email.' });
     } catch (err) {
         res.status(err.status || 400).json({ error: err.message });
     }

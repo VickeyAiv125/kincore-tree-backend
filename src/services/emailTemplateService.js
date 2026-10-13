@@ -209,6 +209,18 @@ export async function renderOtpEmail({ otp, firstName }) {
     });
 }
 
+export async function renderPasswordResetEmail({ firstName, resetUrl }) {
+    const branding = await getEmailBranding();
+    const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+    return buildAccountNotificationEmail({
+        title: 'Reset your password',
+        intro: `${greeting} use the button below to choose a new Kincore password. This link expires in 1 hour.`,
+        branding,
+        cta: { href: resetUrl, label: 'Set new password' },
+        bodyHtml: `<p style="text-align:center;font-size:13px;color:#6b7280;margin-top:16px;">If you did not ask to reset your password, you can ignore this email.</p>`
+    });
+}
+
 export async function renderTreeInviteEmail({
     displayName,
     familyName,

@@ -182,6 +182,97 @@ async function clearSignupOtpState({ userId, userRow, useCols }) {
     });
 }
 
+async function accountExistsForReset(cleanEmail) {
+    const { data: user } = await supabase.from('users').select('id').ilike('email', cleanEmail).maybeSingle();
+    if (user) return true;
+    const { data: adminUser } = await supabase.from('admin_users').select('id').ilike('email', cleanEmail).maybeSingle();
+    if (adminUser) return true;
+    const { data: personUser } = await supabase.from('persons').select('id').ilike('email', cleanEmail).maybeSingle();
+    return Boolean(personUser);
+}
+
+async function ensureLoginAccount(cleanEmail) {
+    let authUser = await findAuthUserByEmail(cleanEmail);
+    const { data: person } = await supabase
+        .from('persons')
+        .select('first_name, last_name, full_name')
+        .ilike('email', cleanEmail)
+        .limit(1)
+        .maybeSingle();
+    const { data: userRow } = await supabase
+        .from('users')
+        .select('first_name, last_name')
+        .ilike('email', cleanEmail)
+        .maybeSingle();
+
+    const firstName = userRow?.first_name || person?.first_name || String(person?.full_name || '').split(' ')[0] || '';
+    const lastName = userRow?.last_name || person?.last_name || String(person?.full_name || '').split(' ').slice(1).join(' ') || '';
+
+    if (!authUser) {
+        const password = crypto.randomBytes(24).toString('base64url');
+        const { data: created, error: createError } = await supabase.auth.admin.createUser({
+            email: cleanEmail,
+            password,
+            email_confirm: true,
+            user_metadata: { first_name: firstName, last_name: lastName, kincore_verified: true }
+        });
+        if (createError) {
+            authUser = await findAuthUserByEmail(cleanEmail);
+            if (!authUser) throw createError;
+        } else {
+            authUser = created.user;
+        }
+    }
+
+    await supabase.from('users').upsert({
+        id: authUser.id,
+        email: cleanEmail,
+        first_name: firstName || null,
+        last_name: lastName || null,
+        status: 'active',
+        updated_at: new Date().toISOString()
+    }, { onConflict: 'id' });
+
+    return { authUser, firstName };
+}
+
+async function sendPasswordResetLink(email) {
+    if (!email) throw new Error('Email is required');
+    const cleanEmail = String(email).trim().toLowerCase();
+    if (!(await accountExistsForReset(cleanEmail))) {
+        const error = new Error('No account found with this email address. Please check your spelling or sign up.');
+        error.status = 404;
+        throw error;
+    }
+
+    const { authUser, firstName } = await ensureLoginAccount(cleanEmail);
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const { error: metaErr } = await supabase.auth.admin.updateUserById(authUser.id, {
+        user_metadata: {
+            ...(authUser.user_metadata || {}),
+            kincore_reset_token: token,
+            kincore_reset_expires_at: expiresAt
+        }
+    });
+    if (metaErr) throw metaErr;
+
+    const webBase = (process.env.FRONTEND_URL || 'https://uat-admin.kincore.com').replace(/\/$/, '');
+    const resetUrl = `${webBase}/reset-password?email=${encodeURIComponent(cleanEmail)}&token=${encodeURIComponent(token)}`;
+    const { renderPasswordResetEmail } = await import('./emailTemplateService.js');
+    const rendered = await renderPasswordResetEmail({ firstName, resetUrl });
+    const result = await sendEmail({
+        to: cleanEmail,
+        subject: 'Reset your Kincore password',
+        html: rendered.html,
+        text: rendered.text
+    });
+    if (!result.ok) {
+        throw new Error(result.error || 'Failed to send the password reset email');
+    }
+    return true;
+}
+
 const sendSignupOtpEmail = async ({ to, otp, firstName }) => {
     const { renderOtpEmail } = await import('./emailTemplateService.js');
     const subject = 'Your Kincore verification code';
@@ -931,72 +1022,11 @@ export const AuthService = {
     },
 
     async webForgotPassword({ email }) {
-        if (!email) throw new Error('Email is required');
-        const cleanEmail = email.trim().toLowerCase();
-
-        // Option B: Immediate UI feedback if account doesn't exist
-        let found = false;
-        const { data: user } = await supabase.from('users').select('id').ilike('email', cleanEmail).maybeSingle();
-        if (user) found = true;
-
-        if (!found) {
-            const { data: adminUser } = await supabase.from('admin_users').select('id').ilike('email', cleanEmail).maybeSingle();
-            if (adminUser) found = true;
-        }
-
-        if (!found) {
-            const { data: personUser } = await supabase.from('persons').select('id').ilike('email', cleanEmail).maybeSingle();
-            if (personUser) found = true;
-        }
-
-        if (!found) {
-            const error = new Error('No account found with this email address. Please check your spelling or sign up.');
-            error.status = 404;
-            throw error;
-        }
-
-        const redirectTo = `${process.env.FRONTEND_URL || 'https://kincore-tree.vercel.app'}/reset-password`;
-        const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-            redirectTo
-        });
-        if (error) throw error;
-        return true;
+        return sendPasswordResetLink(email);
     },
 
     async appForgotPassword({ email }) {
-        if (!email) throw new Error('Email is required');
-        const cleanEmail = email.trim().toLowerCase();
-
-        // Option B: Immediate UI feedback if account doesn't exist
-        let found = false;
-        const { data: user } = await supabase.from('users').select('id').ilike('email', cleanEmail).maybeSingle();
-        if (user) found = true;
-
-        if (!found) {
-            const { data: adminUser } = await supabase.from('admin_users').select('id').ilike('email', cleanEmail).maybeSingle();
-            if (adminUser) found = true;
-        }
-
-        if (!found) {
-            const { data: personUser } = await supabase.from('persons').select('id').ilike('email', cleanEmail).maybeSingle();
-            if (personUser) found = true;
-        }
-
-        if (!found) {
-            const error = new Error('No account found with this email address. Please check your spelling or sign up.');
-            error.status = 404;
-            throw error;
-        }
-
-        // Send 6-digit OTP via Supabase Auth signInWithOtp without creating a user
-        const { error } = await supabase.auth.signInWithOtp({ 
-            email: cleanEmail,
-            options: {
-                shouldCreateUser: false
-            }
-        });
-        if (error) throw error;
-        return true;
+        return sendPasswordResetLink(email);
     },
 
     async appResetPassword({ email, otp_code, new_password }) {
@@ -1004,6 +1034,27 @@ export const AuthService = {
             throw new Error('Email, OTP code, and new password are required');
         }
         const cleanEmail = email.trim().toLowerCase();
+
+        const resetUser = await findAuthUserByEmail(cleanEmail);
+        const resetMeta = resetUser?.user_metadata || {};
+        const resetToken = resetMeta.kincore_reset_token ? String(resetMeta.kincore_reset_token) : '';
+        const resetExpires = resetMeta.kincore_reset_expires_at
+            ? new Date(resetMeta.kincore_reset_expires_at).getTime()
+            : 0;
+        if (resetToken && resetToken === String(otp_code).trim() && resetExpires > Date.now()) {
+            const { error: updateErr } = await supabase.auth.admin.updateUserById(resetUser.id, {
+                password: new_password,
+                email_confirm: true,
+                user_metadata: {
+                    ...resetMeta,
+                    kincore_verified: true,
+                    kincore_reset_token: null,
+                    kincore_reset_expires_at: null
+                }
+            });
+            if (updateErr) throw updateErr;
+            return true;
+        }
 
         // Verify the OTP code
         let verifiedSession = null;
@@ -1075,15 +1126,15 @@ export const AuthService = {
         const { data: persons, error: pErr } = await supabase
             .from('persons')
             .select('*')
-            .ilike('email', cleanEmail)
-            .eq('member_status', 'invitation_pending');
+            .ilike('email', cleanEmail);
 
         if (pErr) throw pErr;
-        if (!persons || persons.length === 0) {
-            return true; // Already processed or no invitation
+        const pendingPersons = (persons || []).filter((person) => !person.claimed_by);
+        if (pendingPersons.length === 0) {
+            return true; // Already linked, or no tree record for this email
         }
 
-        for (const person of persons) {
+        for (const person of pendingPersons) {
             const rawRole = person.pending_role || person.role || 'member';
             const finalRole = normalizeRole(rawRole) || 'member';
 
