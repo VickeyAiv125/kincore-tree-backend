@@ -478,6 +478,13 @@ CREATE TABLE IF NOT EXISTS public.events (
     exclude_same_household BOOLEAN DEFAULT false,
     gift_draw_completed BOOLEAN DEFAULT false,
     participation_scope TEXT NULL,
+    timezone VARCHAR(100),
+    currency VARCHAR(10),
+    join_deadline TIMESTAMPTZ,
+    gift_theme TEXT,
+    keep_givers_secret BOOLEAN DEFAULT false,
+    custom_exclusions JSONB DEFAULT '[]'::jsonb,
+    email_notification_details JSONB,
     created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
 );
 

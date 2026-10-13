@@ -7,6 +7,13 @@ ALTER TABLE public.events ADD COLUMN IF NOT EXISTS include_gift_exchange BOOLEAN
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS request_rsvp BOOLEAN DEFAULT false;
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS send_reminders BOOLEAN DEFAULT false;
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS participation_scope TEXT NULL;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS timezone VARCHAR(100);
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS currency VARCHAR(10);
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS join_deadline TIMESTAMPTZ;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS gift_theme TEXT;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS keep_givers_secret BOOLEAN DEFAULT false;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS custom_exclusions JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS email_notification_details JSONB;
 
 -- Family spaces cover photo
 ALTER TABLE public.family_spaces ADD COLUMN IF NOT EXISTS cover_image VARCHAR(500);

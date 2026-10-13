@@ -30,7 +30,14 @@ const EVENT_COLUMNS = new Set([
     'draw_date',
     'gift_deadline',
     'exclude_same_household',
-    'gift_draw_completed'
+    'gift_draw_completed',
+    'timezone',
+    'currency',
+    'join_deadline',
+    'gift_theme',
+    'keep_givers_secret',
+    'custom_exclusions',
+    'email_notification_details'
 ]);
 
 const toBool = (value) => value === true || value === 'true' || value === '1';
@@ -59,6 +66,7 @@ const pickEventRow = (raw = {}) => {
             || key === 'send_reminders'
             || key === 'exclude_same_household'
             || key === 'gift_draw_completed'
+            || key === 'keep_givers_secret'
         ) {
             row[key] = toBool(value);
             continue;
@@ -86,6 +94,46 @@ const CORE_EVENT_COLUMNS = new Set([
     'branch_name',
     'rsvp_deadline'
 ]);
+
+const parseMaybeJson = (value) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    if (
+        (trimmed.startsWith('{') && trimmed.endsWith('}'))
+        || (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+        try { return JSON.parse(trimmed); } catch { return value; }
+    }
+    return value;
+};
+
+const budgetAmount = (value) => {
+    if (value == null || value === '') return null;
+    const n = Number(String(value).replace(/[^0-9.]/g, ''));
+    return Number.isFinite(n) ? n : null;
+};
+
+/** Fields the app sends that are not part of the original events row. */
+const eventExtras = (raw = {}) => {
+    const extras = {};
+    if (raw.timezone !== undefined) extras.timezone = raw.timezone || null;
+    if (raw.currency !== undefined) extras.currency = raw.currency || null;
+    if (raw.join_deadline !== undefined) extras.join_deadline = raw.join_deadline || null;
+    if (raw.gift_theme !== undefined) extras.gift_theme = raw.gift_theme || null;
+    if (raw.keep_givers_secret !== undefined) extras.keep_givers_secret = toBool(raw.keep_givers_secret);
+    if (raw.custom_exclusions !== undefined) {
+        const custom = parseMaybeJson(raw.custom_exclusions);
+        extras.custom_exclusions = Array.isArray(custom) ? custom : [];
+    }
+    if (raw.email_notification_details !== undefined) {
+        const details = parseMaybeJson(raw.email_notification_details);
+        extras.email_notification_details = details && typeof details === 'object' && !Array.isArray(details)
+            ? details
+            : null;
+    }
+    return extras;
+};
 
 const missingEventsColumn = (error) => {
     const blob = [
@@ -137,6 +185,19 @@ const insertEventRow = async (row) => {
         delete extra[missing];
     }
     return event;
+};
+
+const updateEventRow = async (id, row) => {
+    const payload = { ...row };
+    for (let attempt = 0; attempt < 12; attempt++) {
+        const { data, error } = await supabase.from('events').update(payload).eq('id', id).select().single();
+        if (!error) return data;
+        const missing = missingEventsColumn(error);
+        if (!missing || !(missing in payload)) throw error;
+        delete payload[missing];
+        console.warn(`events is missing column ${missing}; retrying update without it`);
+    }
+    throw new Error('Could not update event');
 };
 
 export const EventService = {
@@ -259,6 +320,15 @@ export const EventService = {
             budget: event.budget || null,
             draw_date: event.draw_date || null,
             gift_deadline: event.gift_deadline || null,
+            timezone: event.timezone || event.invite_methods?.timezone || null,
+            currency: event.currency || event.invite_methods?.currency || null,
+            join_deadline: event.join_deadline || event.rsvp_deadline || event.invite_methods?.join_deadline || null,
+            gift_theme: event.gift_theme || event.invite_methods?.gift_theme || null,
+            keep_givers_secret: event.keep_givers_secret != null
+                ? toBool(event.keep_givers_secret)
+                : (event.invite_methods?.keep_givers_secret != null ? toBool(event.invite_methods.keep_givers_secret) : null),
+            custom_exclusions: event.custom_exclusions || event.invite_methods?.custom_exclusions || [],
+            email_notification_details: event.email_notification_details || event.invite_methods?.email_notification_details || null,
             exclude_same_household: toBool(event.exclude_same_household),
             gift_draw_completed: toBool(event.gift_draw_completed),
             isDrawCompleted: toBool(event.gift_draw_completed)
@@ -317,6 +387,12 @@ export const EventService = {
         if (budget !== undefined) insertData.budget = budget || null;
         if (draw_date !== undefined) insertData.draw_date = draw_date || null;
         if (gift_deadline !== undefined) insertData.gift_deadline = gift_deadline || null;
+
+        const extras = eventExtras(eventData);
+        Object.assign(insertData, extras);
+        if (extras.join_deadline && !insertData.rsvp_deadline) {
+            insertData.rsvp_deadline = extras.join_deadline;
+        }
 
         // Map legacy secret_santa_data into new event gift fields when present
         if (includeGift && secret_santa_data) {
@@ -378,7 +454,8 @@ export const EventService = {
 
         parsedInviteMethods = {
             ...parsedInviteMethods,
-            participation_scope: scope
+            participation_scope: scope,
+            ...extras
         };
 
         const event = await insertEventRow({
@@ -393,10 +470,12 @@ export const EventService = {
             created_at: new Date().toISOString()
         });
 
-        // Surface scope even when the DB column is not migrated yet
+        // Surface scope and gift fields even when a DB column is not migrated yet.
+        // They are also stored on invite_methods, which already exists.
         if (!event.participation_scope) {
             event.participation_scope = scope;
         }
+        Object.assign(event, extras);
 
         try {
             if (insertData.family_space_id) {
@@ -417,15 +496,18 @@ export const EventService = {
         // Handle Secret Santa / gift exchange
         if (includeGift || is_secret_santa === true || is_secret_santa === 'true') {
             const santa = typeof secret_santa_data === 'string' ? JSON.parse(secret_santa_data) : (secret_santa_data || {});
+            const amount = budgetAmount(santa.budget || insertData.budget);
             const { data: exchange, error: ssError } = await supabase
                 .from('secret_santa_exchanges')
                 .insert({
                     event_id: event.id,
-                    budget_min: santa.budgetMin || 0,
-                    budget_max: santa.budgetMax || 0,
-                    gift_deadline: santa.giftDeadline || null,
-                    notes: santa.notes || null,
-                    anonymous_mode: santa.anonymousMode !== false,
+                    budget_min: santa.budgetMin ?? amount ?? 0,
+                    budget_max: santa.budgetMax ?? amount ?? 0,
+                    gift_deadline: santa.giftDeadline || insertData.gift_deadline || null,
+                    notes: santa.notes || insertData.gift_theme || null,
+                    anonymous_mode: insertData.keep_givers_secret != null
+                        ? toBool(insertData.keep_givers_secret)
+                        : santa.anonymousMode !== false,
                     is_locked: santa.isLocked || false
                 })
                 .select()
@@ -528,18 +610,24 @@ export const EventService = {
             updateData.participation_scope = updateData.audience;
         }
 
-        const { data, error } = await supabase
-            .from('events')
-            .update({
-                ...pickEventRow(updateData),
-                cover_photo_url: coverImageUrl,
-                cover_image: coverImageUrl
-            })
-            .eq('id', id)
-            .select()
-            .single();
+        const extras = eventExtras(updateData);
+        Object.assign(updateData, extras);
+        if (extras.join_deadline && updateData.rsvp_deadline === undefined) {
+            updateData.rsvp_deadline = extras.join_deadline;
+        }
+        if (Object.keys(extras).length > 0) {
+            const currentMethods = updateData.invite_methods && typeof updateData.invite_methods === 'object'
+                ? updateData.invite_methods
+                : {};
+            updateData.invite_methods = { ...currentMethods, ...extras };
+        }
 
-        if (error) throw error;
+        const data = await updateEventRow(id, {
+            ...pickEventRow(updateData),
+            cover_photo_url: coverImageUrl,
+            cover_image: coverImageUrl
+        });
+        Object.assign(data, extras);
 
         // 3. Handle Account Invitations Sync (Standard DB Table)
         if (accountIds.length >= 0) {
