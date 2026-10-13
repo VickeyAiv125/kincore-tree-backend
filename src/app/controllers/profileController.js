@@ -409,6 +409,25 @@ export const updateProfile = async (req, res) => {
 
         if (error) throw error;
 
+        // Keep the claimed tree person in step with the account profile.
+        // Search and the tree read these columns from persons.
+        const personUpdates = {};
+        if (date_of_birth !== undefined) {
+            personUpdates.date_of_birth = date_of_birth || null;
+            personUpdates.birth_date = date_of_birth || null;
+        }
+        if (place_of_birth !== undefined) personUpdates.place_of_birth = place_of_birth || null;
+        if (occupation !== undefined) personUpdates.occupation = occupation || null;
+        if (bio !== undefined) personUpdates.bio = bio || null;
+        if (updates.avatar_url) personUpdates.avatar_url = updates.avatar_url;
+        if (Object.keys(personUpdates).length > 0) {
+            const { error: personErr } = await supabase
+                .from('persons')
+                .update(personUpdates)
+                .eq('claimed_by', userId);
+            if (personErr) console.warn('[updateProfile] person sync:', personErr.message);
+        }
+
         res.json({
             success: true,
             message: 'Profile updated successfully',

@@ -718,20 +718,31 @@ export const searchTreeMembers = async (req, res) => {
             }
         }
 
-        // Enrich persons with email from users table if claimed_by or user_id exists
+        // Profile edits are stored on users. A claimed tree person often has those
+        // columns empty, so fill them from the linked account when missing.
         const userIdsToLookup = [...new Set(persons.map(p => p.claimed_by || p.user_id).filter(Boolean))];
-        let userEmailMap = new Map();
+        const userProfileMap = new Map();
         if (userIdsToLookup.length > 0) {
             const { data: uDocs } = await supabase
                 .from('users')
-                .select('id, email')
+                .select('id, email, date_of_birth, place_of_birth, occupation, bio, avatar_url')
                 .in('id', userIdsToLookup);
-            (uDocs || []).forEach(u => userEmailMap.set(u.id, u.email));
+            (uDocs || []).forEach(u => userProfileMap.set(u.id, u));
         }
+        const fillIfEmpty = (person, key, value) => {
+            if (value == null || value === '') return;
+            if (person[key] == null || person[key] === '') person[key] = value;
+        };
         persons.forEach(p => {
-            if (!p.email && (p.claimed_by || p.user_id)) {
-                p.email = userEmailMap.get(p.claimed_by || p.user_id) || null;
-            }
+            const account = userProfileMap.get(p.claimed_by || p.user_id);
+            if (!account) return;
+            fillIfEmpty(p, 'email', account.email);
+            fillIfEmpty(p, 'date_of_birth', account.date_of_birth);
+            fillIfEmpty(p, 'birth_date', account.date_of_birth);
+            fillIfEmpty(p, 'place_of_birth', account.place_of_birth);
+            fillIfEmpty(p, 'occupation', account.occupation);
+            fillIfEmpty(p, 'bio', account.bio);
+            fillIfEmpty(p, 'avatar_url', account.avatar_url);
         });
 
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
