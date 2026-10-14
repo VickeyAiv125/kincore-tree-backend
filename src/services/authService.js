@@ -722,6 +722,16 @@ export const AuthService = {
         let userObj = null;
         let sessionAccessToken = access_token || null;
 
+        // Facebook/Google return a short ticket, not the session JWT.
+        if (sessionAccessToken && !String(sessionAccessToken).includes('.')) {
+            const { readOAuthHandoffTicket } = await import('../utils/oauthHandoffStore.js');
+            const handed = readOAuthHandoffTicket(sessionAccessToken);
+            if (!handed?.token) {
+                throw new Error('Invalid or expired OAuth access token.');
+            }
+            sessionAccessToken = handed.token;
+        }
+
         // Native mobile Google: exchange Google ID token → Supabase session
         if (!sessionAccessToken && id_token && String(provider || '').toLowerCase() === 'google') {
             const tokenInfoRes = await fetch(

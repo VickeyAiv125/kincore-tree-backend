@@ -26,6 +26,7 @@ import {
 import {
     cacheOAuthRedirectForCode,
     consumeOAuthHandoffTicket,
+    createOAuthHandoffTicket,
     getCachedOAuthRedirectForCode
 } from '../../utils/oauthHandoffStore.js';
 
@@ -44,12 +45,13 @@ const finishOAuthCallbackRedirect = ({
     provider,
     code
 }) => {
-    // Native app (existing APK): kincore://auth/callback?token=...&provider=...
-    // Future app builds may use GET /api/auth/oauth-handoff?oauth_ticket=... instead of long tokens in the URL.
+    // Short ticket in the return URL. The app posts it to /auth/oauth-login,
+    // which swaps it for the session. A full JWT in the URL was being rejected.
+    const ticket = token ? createOAuthHandoffTicket({ token, provider }) : '';
     const redirectUrl = buildOAuthCallbackRedirect({
         clientType,
         redirectTo,
-        params: { token, provider }
+        params: { token: ticket || token, provider }
     });
     if (code) cacheOAuthRedirectForCode(code, redirectUrl);
     return redirectUrl;
@@ -230,6 +232,12 @@ export const facebookAuthCallback = async (req, res) => {
     let redirectTo = null;
     try {
         const { code, state, error, error_description: errorDescription, error_reason: errorReason } = req.query;
+        const codeStr = String(code || '');
+        const cachedRedirect = codeStr ? getCachedOAuthRedirectForCode(codeStr) : null;
+        if (cachedRedirect) {
+            return res.redirect(cachedRedirect);
+        }
+
         const stateMeta = consumeFacebookOAuthState(String(state || ''));
         clientType = stateMeta?.clientType || 'web';
         redirectTo = stateMeta?.redirectTo || null;
@@ -237,15 +245,9 @@ export const facebookAuthCallback = async (req, res) => {
         if (error) {
             throw new Error(errorDescription || errorReason || error || 'Facebook authorization was denied');
         }
-        if (!code) throw new Error('Missing authorization code from Facebook');
-        const codeStr = String(code);
+        if (!codeStr) throw new Error('Missing authorization code from Facebook');
         if (!stateMeta) {
             throw new Error('Invalid or expired Facebook sign-in state. Please try again.');
-        }
-        const expectedBase = resolveOAuthRedirectBase({ clientType, redirectTo });
-        const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
-        if (cachedRedirect && cachedRedirect.startsWith(expectedBase)) {
-            return res.redirect(cachedRedirect);
         }
 
         const { profile } = await exchangeFacebookCode(codeStr);

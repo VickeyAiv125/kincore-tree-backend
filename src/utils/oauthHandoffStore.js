@@ -1,52 +1,131 @@
 /**
- * In-memory OAuth handoff: idempotent callback redirects + short tickets for native apps.
+ * OAuth handoff stored on disk so a restart does not drop Facebook linking
+ * or the short sign-in ticket the app exchanges for a session.
  */
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
-const TTL_MS = 10 * 60 * 1000;
-const redirectByCode = new Map();
-const ticketStore = new Map();
+const TTL_MS = 15 * 60 * 1000;
+const FILE = process.env.OAUTH_STORE_PATH || '/tmp/kincore-oauth-store.json';
 
-const prune = () => {
+const empty = () => ({
+    redirects: {},
+    tickets: {},
+    facebookStates: {},
+    facebookPending: {}
+});
+
+const readAll = () => {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+        return { ...empty(), ...parsed };
+    } catch {
+        return empty();
+    }
+};
+
+const writeAll = (data) => {
+    try {
+        fs.mkdirSync(path.dirname(FILE), { recursive: true });
+        const tmp = `${FILE}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(data));
+        fs.renameSync(tmp, FILE);
+    } catch (err) {
+        console.warn('[OAUTH_STORE] persist skipped:', err.message);
+    }
+};
+
+const pruneBucket = (bucket, now) => {
+    for (const [key, row] of Object.entries(bucket || {})) {
+        const at = row?.at || row?.createdAt || 0;
+        if (!at || now - at > TTL_MS) delete bucket[key];
+    }
+};
+
+const withStore = (mutator) => {
+    const data = readAll();
     const now = Date.now();
-    for (const [key, meta] of redirectByCode.entries()) {
-        if (now - meta.at > TTL_MS) redirectByCode.delete(key);
-    }
-    for (const [key, meta] of ticketStore.entries()) {
-        if (now - meta.at > TTL_MS) ticketStore.delete(key);
-    }
+    pruneBucket(data.redirects, now);
+    pruneBucket(data.tickets, now);
+    pruneBucket(data.facebookStates, now);
+    pruneBucket(data.facebookPending, now);
+    const result = mutator(data, now);
+    writeAll(data);
+    return result;
 };
 
 export const getCachedOAuthRedirectForCode = (code) => {
-    prune();
     const key = String(code || '').trim();
     if (!key) return null;
-    return redirectByCode.get(key)?.redirectUrl || null;
+    return withStore((data) => data.redirects[key]?.redirectUrl || null);
 };
 
 export const cacheOAuthRedirectForCode = (code, redirectUrl) => {
-    prune();
     const key = String(code || '').trim();
     if (!key || !redirectUrl) return;
-    redirectByCode.set(key, { redirectUrl, at: Date.now() });
+    withStore((data, now) => {
+        data.redirects[key] = { redirectUrl, at: now };
+    });
 };
 
 export const createOAuthHandoffTicket = ({ token, provider }) => {
-    prune();
     const ticket = crypto.randomBytes(18).toString('hex');
-    ticketStore.set(ticket, {
-        token,
-        provider: provider || 'google',
-        at: Date.now()
+    withStore((data, now) => {
+        data.tickets[ticket] = {
+            token,
+            provider: provider || 'google',
+            at: now
+        };
     });
     return ticket;
 };
 
-export const consumeOAuthHandoffTicket = (ticket) => {
-    prune();
+/** Reusable until expiry. The app calls oauth-login twice for one redirect. */
+export const readOAuthHandoffTicket = (ticket) => {
     const key = String(ticket || '').trim();
-    if (!key || !ticketStore.has(key)) return null;
-    const meta = ticketStore.get(key);
-    ticketStore.delete(key);
-    return meta;
+    if (!key) return null;
+    return withStore((data) => data.tickets[key] || null);
+};
+
+export const consumeOAuthHandoffTicket = readOAuthHandoffTicket;
+
+export const saveFacebookOAuthState = (state, meta = {}) => {
+    const key = String(state || '').trim();
+    if (!key) return;
+    withStore((data, now) => {
+        data.facebookStates[key] = { ...meta, createdAt: now };
+    });
+};
+
+export const consumeFacebookOAuthStateRecord = (state) => {
+    const key = String(state || '').trim();
+    if (!key) return null;
+    return withStore((data) => {
+        const meta = data.facebookStates[key] || null;
+        if (meta) delete data.facebookStates[key];
+        return meta;
+    });
+};
+
+export const saveFacebookPending = (id, row) => {
+    const key = String(id || '').trim();
+    if (!key) return;
+    withStore((data, now) => {
+        data.facebookPending[key] = { ...row, createdAt: row.createdAt || now };
+    });
+};
+
+export const readFacebookPending = (id) => {
+    const key = String(id || '').trim();
+    if (!key) return null;
+    return withStore((data) => data.facebookPending[key] || null);
+};
+
+export const deleteFacebookPending = (id) => {
+    const key = String(id || '').trim();
+    if (!key) return;
+    withStore((data) => {
+        delete data.facebookPending[key];
+    });
 };

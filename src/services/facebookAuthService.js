@@ -7,17 +7,15 @@ import {
     createSessionForEmail,
     ensureUserFromGoogleProfile as ensureUserFromSocialProfile
 } from './googleAuthService.js';
+import {
+    consumeFacebookOAuthStateRecord,
+    deleteFacebookPending,
+    readFacebookPending,
+    saveFacebookOAuthState,
+    saveFacebookPending
+} from '../utils/oauthHandoffStore.js';
 
 const GRAPH_VERSION = 'v21.0';
-const STATE_TTL_MS = 10 * 60 * 1000;
-const pendingStates = new Map();
-
-const pruneStates = () => {
-    const now = Date.now();
-    for (const [key, meta] of pendingStates.entries()) {
-        if (now - meta.createdAt > STATE_TTL_MS) pendingStates.delete(key);
-    }
-};
 
 const trimEnv = (value) =>
     String(value || '').trim().replace(/^['"]+|['"]+$/g, '');
@@ -41,19 +39,12 @@ export const getFacebookClientConfig = () => {
 };
 
 export const createFacebookOAuthState = (meta = {}) => {
-    pruneStates();
     const state = crypto.randomBytes(24).toString('hex');
-    pendingStates.set(state, { createdAt: Date.now(), ...meta });
+    saveFacebookOAuthState(state, meta);
     return state;
 };
 
-export const consumeFacebookOAuthState = (state) => {
-    pruneStates();
-    if (!state || !pendingStates.has(state)) return null;
-    const meta = pendingStates.get(state);
-    pendingStates.delete(state);
-    return meta;
-};
+export const consumeFacebookOAuthState = (state) => consumeFacebookOAuthStateRecord(state);
 
 export const buildFacebookAuthorizeUrl = ({ state }) => {
     const { appId, redirectUri } = getFacebookClientConfig();
@@ -179,16 +170,6 @@ export const exchangeFacebookCode = async (code) => {
     };
 };
 
-const PENDING_TTL_MS = 15 * 60 * 1000;
-const pendingFacebook = new Map();
-
-const prunePendingFacebook = () => {
-    const now = Date.now();
-    for (const [key, row] of pendingFacebook.entries()) {
-        if (now - row.createdAt > PENDING_TTL_MS) pendingFacebook.delete(key);
-    }
-};
-
 const isUsableFacebookEmail = (email) => {
     const value = String(email || '').trim().toLowerCase();
     if (!value.includes('@') || value.includes(' ')) return false;
@@ -285,16 +266,14 @@ const classifyFacebookProfile = async (profile) => {
 };
 
 const savePending = (row) => {
-    prunePendingFacebook();
     const id = crypto.randomBytes(24).toString('hex');
-    pendingFacebook.set(id, { ...row, createdAt: Date.now() });
+    saveFacebookPending(id, { ...row, createdAt: Date.now() });
     return id;
 };
 
-const readPending = (id) => {
-    prunePendingFacebook();
-    return pendingFacebook.get(String(id || '')) || null;
-};
+const readPending = (id) => readFacebookPending(id);
+
+const writePending = (id, row) => saveFacebookPending(id, row);
 
 const stepPage = ({ title, intro, error, pendingId, hidden = {}, fields = '', submitLabel }) => `<!doctype html>
 <html lang="en">
@@ -412,7 +391,7 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
         email: decision.email || '',
         userId: decision.userId || null
     });
-    return { kind: 'html', html: pageForPending(pendingId, pendingFacebook.get(pendingId)) };
+    return { kind: 'html', html: pageForPending(pendingId, readPending(pendingId)) };
 };
 
 export const continueFacebookSignIn = async (body = {}) => {
@@ -431,6 +410,7 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.otp = otp;
         pending.otpExpiresAt = Date.now() + 10 * 60 * 1000;
         pending.action = 'verify_email';
+        writePending(body.pending_id, pending);
         await sendFacebookOtp({ to: email, otp, firstName: pending.profile.firstName });
         return { kind: 'html', html: pageForPending(body.pending_id, pending) };
     }
@@ -450,6 +430,7 @@ export const continueFacebookSignIn = async (body = {}) => {
             pending.action = 'register';
             pending.userId = null;
         }
+        writePending(body.pending_id, pending);
         return { kind: 'html', html: pageForPending(body.pending_id, pending) };
     }
 
@@ -478,7 +459,7 @@ export const continueFacebookSignIn = async (body = {}) => {
         } catch (err) {
             return fail(err.message);
         }
-        pendingFacebook.delete(String(body.pending_id));
+        deleteFacebookPending(body.pending_id);
         return {
             kind: 'token',
             token,
@@ -502,6 +483,7 @@ export const continueFacebookSignIn = async (body = {}) => {
             pending.email = email;
             pending.action = 'link';
             pending.userId = existing.id;
+            writePending(body.pending_id, pending);
             return {
                 kind: 'html',
                 html: pageForPending(body.pending_id, pending, 'That email already has a KCC ID. Sign in to link Facebook.')
@@ -521,7 +503,7 @@ export const continueFacebookSignIn = async (body = {}) => {
             profile: { ...pending.profile, firstName, lastName, email },
             userId: null
         });
-        pendingFacebook.delete(String(body.pending_id));
+        deleteFacebookPending(body.pending_id);
         return {
             kind: 'token',
             token,
