@@ -690,11 +690,15 @@ export const AuthService = {
             throw new Error('Your account has been suspended. Please contact support.');
         }
 
+        const meta = data.user?.user_metadata || {};
+        const emailConfirmed = Boolean(data.user?.email_confirmed_at) || meta.kincore_verified === true;
         let blockedUnverified = false;
         if (useCols) {
-            blockedUnverified = userRecord && userRecord.is_verified === false;
+            blockedUnverified = userRecord && userRecord.is_verified === false && !emailConfirmed;
+            if (userRecord?.is_verified === false && emailConfirmed) {
+                await supabase.from('users').update({ is_verified: true }).eq('id', userId);
+            }
         } else {
-            const meta = data.user?.user_metadata || {};
             blockedUnverified = meta.kincore_verified === false
                 || (meta.kincore_otp && meta.kincore_verified !== true);
         }
@@ -1053,6 +1057,14 @@ export const AuthService = {
                 }
             });
             if (updateErr) throw updateErr;
+            if (await usersHaveOtpColumns()) {
+                await supabase.from('users').update({
+                    is_verified: true,
+                    otp: null,
+                    otp_expires_at: null,
+                    updated_at: new Date().toISOString()
+                }).eq('id', resetUser.id);
+            }
             return true;
         }
 
