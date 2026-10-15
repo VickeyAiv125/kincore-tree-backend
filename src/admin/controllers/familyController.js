@@ -2892,22 +2892,78 @@ export const getFamilyMigrationMap = async (req, res) => {
         const treeIds = trees?.map(t => t.id) || [];
 
         let personsPoints = [];
+        const personNames = {};
         if (treeIds.length > 0) {
             const { data: persons, error: pError } = await supabase
                 .from('persons')
                 .select('id, full_name, birth_place, death_place, latitude, longitude, clan_tree_id, birth_date')
-                .in('clan_tree_id', treeIds)
-                .not('latitude', 'is', null);
+                .in('clan_tree_id', treeIds);
 
             if (!pError && persons) {
-                personsPoints = persons;
+                persons.forEach((person) => {
+                    personNames[person.id] = person.full_name;
+                });
+                personsPoints = persons.filter((person) => person.latitude != null);
             }
         }
+
+        const { data: memberRows } = await supabase
+            .from('family_memberships')
+            .select('user_id')
+            .eq('family_space_id', familySpaceId);
+        const memberIds = [...new Set((memberRows || []).map((row) => row.user_id).filter(Boolean))];
+        let profiles = [];
+        if (memberIds.length > 0) {
+            const { data: profileRows } = await supabase
+                .from('users')
+                .select('id, first_name, last_name, bio, date_of_birth, place_of_birth, avatar_url')
+                .in('id', memberIds);
+            profiles = profileRows || [];
+        }
+
+        const yearOfDate = (value) => {
+            if (!value) return null;
+            const year = new Date(value).getUTCFullYear();
+            return Number.isNaN(year) ? null : year;
+        };
+
+        const stories = [];
+        for (const point of migrationPoints || []) {
+            const linked = Array.isArray(point.persons) ? point.persons : [];
+            const personName = linked.map((id) => personNames[id]).find(Boolean) || '';
+            stories.push({
+                id: point.id,
+                year: yearOfDate(point.date_value) || (point.approximate_period ? Number(String(point.approximate_period).slice(0, 4)) || null : null),
+                location: point.to_location || point.from_location || '',
+                title: point.title || 'Migration',
+                person_name: personName,
+                body: point.description || '',
+                image: null,
+                source: 'migration'
+            });
+        }
+        for (const profile of profiles) {
+            const body = String(profile.bio || '').trim();
+            if (!body) continue;
+            const personName = `${profile.first_name || ''} ${profile.last_name || ''}`.trim();
+            stories.push({
+                id: `profile-${profile.id}`,
+                year: yearOfDate(profile.date_of_birth),
+                location: profile.place_of_birth || '',
+                title: personName ? `${personName}'s story` : 'Profile story',
+                person_name: personName,
+                body,
+                image: profile.avatar_url || null,
+                source: 'profile'
+            });
+        }
+        stories.sort((a, b) => (a.year || 9999) - (b.year || 9999));
 
         res.json({
             family_space_id: familySpaceId,
             migration_data: migrationPoints || [],
-            points: personsPoints
+            points: personsPoints,
+            stories
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
