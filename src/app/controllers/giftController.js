@@ -106,6 +106,41 @@ export const joinGiftExchange = async (req, res) => {
 };
 
 /**
+ * GET /events/:id/gift-exchange/participants
+ * Names and avatars for fortune-wheel slices, in stable index order.
+ */
+export const getGiftParticipants = async (req, res) => {
+    try {
+        const data = await GiftExchangeService.getWheelParticipants({
+            eventId: req.params.id,
+            userId: req.user.id
+        });
+        res.json(data);
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+};
+
+/**
+ * POST /events/:id/gift-exchange/winner
+ * Body: { "redraw": false }
+ * Picks one winner and returns winner_index so the wheel lands on that slice.
+ */
+export const spinGiftWheel = async (req, res) => {
+    try {
+        const redraw = req.body?.redraw === true || req.body?.redraw === 'true';
+        const data = await GiftExchangeService.drawWheelWinner({
+            eventId: req.params.id,
+            userId: req.user.id,
+            redraw
+        });
+        res.json(data);
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+};
+
+/**
  * POST /events/:id/gift-exchange/draw
  */
 export const runDrawing = async (req, res) => {

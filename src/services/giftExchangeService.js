@@ -531,6 +531,172 @@ export const GiftExchangeService = {
         });
     },
 
+    async assertWheelAccess(event, userId) {
+        if (!userId) {
+            const err = new Error('Sign in to view this gift exchange');
+            err.status = 401;
+            throw err;
+        }
+        if (event.creator_id === userId) return;
+        if (event.family_space_id) {
+            const { data: mem } = await supabase
+                .from('family_memberships')
+                .select('role')
+                .eq('family_space_id', event.family_space_id)
+                .eq('user_id', userId)
+                .maybeSingle();
+            if (mem) return;
+        }
+        const { data: joined } = await supabase
+            .from('gift_exchange_participants')
+            .select('user_id')
+            .eq('event_id', event.id)
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (joined) return;
+        const err = new Error('You do not have access to this gift exchange');
+        err.status = 403;
+        throw err;
+    },
+
+    async assertWheelAdmin(event, userId) {
+        if (event.creator_id === userId) return;
+        if (event.family_space_id && userId) {
+            const { data: mem } = await supabase
+                .from('family_memberships')
+                .select('role')
+                .eq('family_space_id', event.family_space_id)
+                .eq('user_id', userId)
+                .maybeSingle();
+            const role = String(mem?.role || '').toLowerCase();
+            if (['owner', 'admin', 'family-admin', 'co-admin'].includes(role)) return;
+        }
+        const err = new Error('Only the event admin can redraw the wheel');
+        err.status = 403;
+        throw err;
+    },
+
+    /**
+     * Stable wheel slices: people who joined, in join order.
+     * If fewer than 2 joined, use the same people the gift draw would include.
+     */
+    async listWheelParticipants(event) {
+        const { data: rows, error } = await supabase
+            .from('gift_exchange_participants')
+            .select('user_id, created_at')
+            .eq('event_id', event.id)
+            .order('created_at', { ascending: true })
+            .order('user_id', { ascending: true });
+        if (error) throw error;
+
+        let userIds = [...new Set((rows || []).map((row) => row.user_id).filter(Boolean))];
+        if (userIds.length < 2) {
+            userIds = await resolveDrawUserIds(event);
+            userIds.sort();
+        }
+        if (!userIds.length) {
+            return [];
+        }
+
+        const { data: users, error: userErr } = await supabase
+            .from('users')
+            .select('id, first_name, last_name, avatar_url')
+            .in('id', userIds);
+        if (userErr) throw userErr;
+
+        const byId = new Map((users || []).map((user) => [user.id, user]));
+        return userIds.map((userId, index) => {
+            const user = byId.get(userId) || { id: userId };
+            const name = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Member';
+            return {
+                index,
+                user_id: userId,
+                name,
+                first_name: user.first_name || '',
+                last_name: user.last_name || '',
+                avatar_url: user.avatar_url || null
+            };
+        });
+    },
+
+    async getWheelParticipants({ eventId, userId }) {
+        const event = await this.getEventOrThrow(eventId);
+        await this.assertGiftExchangeEnabled(event);
+        await this.assertWheelAccess(event, userId);
+        const participants = await this.listWheelParticipants(event);
+        return {
+            event_id: event.id,
+            count: participants.length,
+            participants
+        };
+    },
+
+    async drawWheelWinner({ eventId, userId, redraw = false }) {
+        const event = await this.getEventOrThrow(eventId);
+        await this.assertGiftExchangeEnabled(event);
+        await this.assertWheelAccess(event, userId);
+
+        const participants = await this.listWheelParticipants(event);
+        if (participants.length < 2) {
+            const err = new Error('At least 2 participants must join before the wheel can be spun');
+            err.status = 400;
+            throw err;
+        }
+
+        let methods = event.invite_methods;
+        if (typeof methods === 'string') {
+            try { methods = JSON.parse(methods); } catch { methods = {}; }
+        }
+        if (!methods || typeof methods !== 'object' || Array.isArray(methods)) methods = {};
+        const existing = methods.gift_wheel && typeof methods.gift_wheel === 'object'
+            ? methods.gift_wheel
+            : null;
+
+        if (existing?.winner_user_id && !redraw) {
+            const index = participants.findIndex((person) => person.user_id === existing.winner_user_id);
+            if (index >= 0) {
+                return {
+                    event_id: event.id,
+                    already_drawn: true,
+                    drawn_at: existing.drawn_at || null,
+                    winner_index: index,
+                    winner: participants[index],
+                    participants
+                };
+            }
+        }
+
+        if (redraw) await this.assertWheelAdmin(event, userId);
+
+        const winnerIndex = Math.floor(Math.random() * participants.length);
+        const winner = participants[winnerIndex];
+        const drawnAt = new Date().toISOString();
+        const { error: saveErr } = await supabase
+            .from('events')
+            .update({
+                invite_methods: {
+                    ...methods,
+                    gift_wheel: {
+                        winner_user_id: winner.user_id,
+                        winner_index: winnerIndex,
+                        drawn_by: userId,
+                        drawn_at: drawnAt
+                    }
+                }
+            })
+            .eq('id', event.id);
+        if (saveErr) throw saveErr;
+
+        return {
+            event_id: event.id,
+            already_drawn: false,
+            drawn_at: drawnAt,
+            winner_index: winnerIndex,
+            winner,
+            participants
+        };
+    },
+
     /** Cron helper: run draws for events whose draw_date has passed. */
     async runDueDraws() {
         const now = new Date().toISOString();

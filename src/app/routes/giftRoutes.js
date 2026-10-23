@@ -3,6 +3,8 @@ import {
     setupGiftExchange,
     joinGiftExchange,
     runDrawing,
+    getGiftParticipants,
+    spinGiftWheel,
     getMyRecipient,
     getMyPairing,
     updateGiftStatus,
@@ -17,6 +19,12 @@ router.post('/', authMiddleware, setupGiftExchange);
 
 // POST /api/events/:id/gift-exchange/join
 router.post('/join', authMiddleware, joinGiftExchange);
+
+// GET /api/events/:id/gift-exchange/participants
+router.get('/participants', authMiddleware, getGiftParticipants);
+
+// POST /api/events/:id/gift-exchange/winner — fortune wheel lands on winner_index
+router.post('/winner', authMiddleware, spinGiftWheel);
 
 // POST /api/events/:id/gift-exchange/draw
 router.post('/draw', authMiddleware, runDrawing);
