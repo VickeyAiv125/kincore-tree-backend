@@ -14,8 +14,22 @@ const upload = multer({
 
 const router = express.Router();
 
+// The web app calls this right after Google login with family_space_id=null
+// and no bearer token. A 401 there wipes the new session and returns to Sign Up.
+const ignoreEmptyMemoryLookup = (req, res, next) => {
+    const familyId = String(req.query.family_space_id || '').trim();
+    const header = String(req.headers.authorization || '');
+    const token = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
+    const missingFamily = !familyId || familyId === 'null' || familyId === 'undefined';
+    const missingToken = !token || token === 'null' || token === 'undefined';
+    if (missingFamily && missingToken) {
+        return res.json([]);
+    }
+    return next();
+};
+
 // GET /api/memories?family_space_id=...
-router.get('/', authMiddleware, getMemories);
+router.get('/', ignoreEmptyMemoryLookup, authMiddleware, getMemories);
 
 // POST /api/memories/photo
 router.post('/photo', authMiddleware, upload.single('file'), savePhoto);
