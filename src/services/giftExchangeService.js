@@ -338,7 +338,20 @@ export const GiftExchangeService = {
         const event = await this.getEventOrThrow(eventId);
         await this.assertGiftExchangeEnabled(event);
 
+        let methods = event.invite_methods;
+        if (typeof methods === 'string') {
+            try { methods = JSON.parse(methods); } catch { methods = {}; }
+        }
+        const wheelWinnerId = methods?.gift_wheel?.winner_user_id || null;
+
         if (!event.gift_draw_completed) {
+            if (wheelWinnerId) {
+                const wheelRecipient = await this.recipientFromWheelWinner(eventId, wheelWinnerId, userId);
+                if (wheelRecipient) {
+                    await supabase.from('events').update({ gift_draw_completed: true }).eq('id', eventId);
+                    return wheelRecipient;
+                }
+            }
             const err = new Error('Gift draw has not been completed yet');
             err.status = 404;
             throw err;
@@ -359,6 +372,10 @@ export const GiftExchangeService = {
 
         if (error) throw error;
         if (!row || !row.recipient) {
+            if (wheelWinnerId) {
+                const wheelRecipient = await this.recipientFromWheelWinner(eventId, wheelWinnerId, userId);
+                if (wheelRecipient) return wheelRecipient;
+            }
             const err = new Error('No recipient assignment found for you in this exchange');
             err.status = 404;
             throw err;
@@ -379,6 +396,43 @@ export const GiftExchangeService = {
             recipient_avatar: r.avatar_url || null,
             preferences: recipientPrefs?.preferences || null,
             gift_status: row.gift_status || 'Not Started'
+        };
+    },
+
+    async recipientFromWheelWinner(eventId, winnerUserId, callerUserId) {
+        const { data: winner, error } = await supabase
+            .from('users')
+            .select('id, first_name, last_name, avatar_url')
+            .eq('id', winnerUserId)
+            .maybeSingle();
+        if (error) throw error;
+        if (!winner) return null;
+
+        const { data: winnerPrefs } = await supabase
+            .from('gift_exchange_participants')
+            .select('preferences')
+            .eq('event_id', eventId)
+            .eq('user_id', winnerUserId)
+            .maybeSingle();
+
+        let giftStatus = 'Not Started';
+        if (callerUserId) {
+            const { data: callerRow } = await supabase
+                .from('gift_exchange_participants')
+                .select('gift_status')
+                .eq('event_id', eventId)
+                .eq('user_id', callerUserId)
+                .maybeSingle();
+            if (callerRow?.gift_status) giftStatus = callerRow.gift_status;
+        }
+
+        return {
+            recipient_id: winner.id,
+            recipient_name: `${winner.first_name || ''} ${winner.last_name || ''}`.trim() || 'Member',
+            recipient_avatar: winner.avatar_url || null,
+            preferences: winnerPrefs?.preferences || null,
+            gift_status: giftStatus,
+            winner_user_id: winner.id
         };
     },
 
@@ -674,6 +728,7 @@ export const GiftExchangeService = {
         const { error: saveErr } = await supabase
             .from('events')
             .update({
+                gift_draw_completed: true,
                 invite_methods: {
                     ...methods,
                     gift_wheel: {
