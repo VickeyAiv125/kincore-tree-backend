@@ -604,68 +604,47 @@ export const addFamilyMember = async (req, res) => {
 };
 
 /**
- * Search for members in the tree.
+ * Search people across every family, not only the caller's space.
+ * family_space_id is accepted and ignored so older clients keep working.
  */
 export const searchTreeMembers = async (req, res) => {
     try {
-        const { family_space_id, query } = req.query;
-
-        if (!family_space_id) return res.status(400).json({ error: 'family_space_id is required' });
-
-        // Deep Recovery: Fetch tree IDs linked to this space
-        const { data: trees } = await supabase
-            .from('clan_trees')
-            .select('id')
-            .eq('family_space_id', family_space_id);
-
-        const treeIds = trees?.map(t => t.id) || [];
+        const term = String(req.query.query || '').replace(/[%_,()]/g, '').trim();
 
         let dbQuery = supabase
             .from('persons')
             .select('*');
 
-        // Search by Space ID OR Tree IDs
-        if (treeIds.length > 0) {
-            dbQuery = dbQuery.or(`family_space_id.eq.${family_space_id},clan_tree_id.in.(${treeIds.join(',')})`);
-        } else {
-            dbQuery = dbQuery.eq('family_space_id', family_space_id);
-        }
-
-        if (query) {
-            // Combine with name filter. PostgREST .or() syntax for complex conditions:
-            // (family_space_id.eq.X) AND (full_name.ilike.Y, ...)
-            // However, Supabase .or is for OR conditions at that level.
-            // We'll use a more surgical approach:
-            dbQuery = dbQuery.or(`full_name.ilike.%${query}%,first_name.ilike.%${query}%,last_name.ilike.%${query}%`);
+        if (term) {
+            dbQuery = dbQuery.or(`full_name.ilike.%${term}%,first_name.ilike.%${term}%,last_name.ilike.%${term}%`);
         }
 
         let { data: persons, error } = await dbQuery.limit(50);
         if (error) throw error;
+        persons = persons || [];
 
-        // Role-Aware Search Supplement
-        if (query) {
-            // A. Search memberships for matching roles
+        // Role-Aware Search Supplement across every family, not one space.
+        if (term) {
             const { data: roleMatches } = await supabase
                 .from('family_memberships')
                 .select('user_id, role')
-                .eq('family_space_id', family_space_id)
-                .ilike('role', `%${query}%`);
+                .ilike('role', `%${term}%`)
+                .limit(50);
 
-            // B. Search Users table for name/email matches
             const { data: userMatches } = await supabase
                 .from('users')
-                .select('id')
-                .or(`first_name.ilike.%${query}%,last_name.ilike.%${query}%,email.ilike.%${query}%`);
+                .select('id, first_name, last_name, email')
+                .or(`first_name.ilike.%${term}%,last_name.ilike.%${term}%,email.ilike.%${term}%`)
+                .limit(50);
 
             const userIdsFromNames = userMatches?.map(u => u.id) || [];
+            const userById = new Map((userMatches || []).map(u => [u.id, u]));
 
-            // Filter those users to only those in the current space
             let memberMatches = [];
             if (userIdsFromNames.length > 0) {
                 const { data: m } = await supabase
                     .from('family_memberships')
                     .select('user_id, role')
-                    .eq('family_space_id', family_space_id)
                     .in('user_id', userIdsFromNames);
                 memberMatches = m || [];
             }
@@ -701,19 +680,18 @@ export const searchTreeMembers = async (req, res) => {
                 }
 
                 allMemberMatches.forEach(match => {
-                    if (!userIdsWithClaim.has(match.user_id)) {
-                        // This is a member of the space with no tree node.
-                        // We synthesize a "Virtual Node" for them so they can be assigned as Branch Admin.
-                        persons.push({
-                            id: match.user_id, // We use User ID here, backend save will resolve this
-                            full_name: `${match.users?.first_name || 'Member'} ${match.users?.last_name || ''} (${match.role} - Unlinked)`.trim(),
-                            first_name: match.users?.first_name,
-                            last_name: match.users?.last_name,
-                            email: match.users?.email || null,
-                            is_virtual: true,
-                            user_id: match.user_id
-                        });
-                    }
+                    if (userIdsWithClaim.has(match.user_id)) return;
+                    if (persons.some(p => p.id === match.user_id || p.user_id === match.user_id || p.claimed_by === match.user_id)) return;
+                    const account = userById.get(match.user_id);
+                    persons.push({
+                        id: match.user_id,
+                        full_name: `${account?.first_name || 'Member'} ${account?.last_name || ''} (${match.role} - Unlinked)`.trim(),
+                        first_name: account?.first_name,
+                        last_name: account?.last_name,
+                        email: account?.email || null,
+                        is_virtual: true,
+                        user_id: match.user_id
+                    });
                 });
             }
         }
