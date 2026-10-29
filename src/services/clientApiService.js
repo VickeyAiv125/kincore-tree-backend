@@ -55,6 +55,63 @@ class ClientApiService {
         throw err;
     }
 
+    /**
+     * Flutter web often calls wallet/me with a Kincore session JWT (not KCC wallet token).
+     * Resolve the linked user and read balance via BigK Admin when configured.
+     */
+    async getWalletDetailsForKincoreUser(userId, email) {
+        const adminToken = await this.getAdminToken();
+        if (!adminToken) {
+            throw new Error('Wallet service is not configured on the server.');
+        }
+
+        const { data: row } = await supabase
+            .from('users')
+            .select('wallet_handle, email')
+            .eq('id', userId)
+            .maybeSingle();
+
+        const candidates = [
+            row?.wallet_handle,
+            row?.email,
+            email
+        ]
+            .map((v) => String(v || '').trim())
+            .filter(Boolean);
+
+        const base = this.getBigKAdminBase();
+        const headers = { Authorization: `Bearer ${adminToken}`, Accept: 'application/json' };
+        let lastResponse = null;
+
+        for (const key of [...new Set(candidates)]) {
+            try {
+                const response = await axios.get(`${base}/wallets/${encodeURIComponent(key)}`, {
+                    headers,
+                    timeout: 15000,
+                    validateStatus: () => true
+                });
+                lastResponse = response;
+                if (response.status >= 200 && response.status < 300) {
+                    const body = response.data;
+                    const wallet = body?.wallet || body?.data || body;
+                    return {
+                        wallet: {
+                            id: wallet?.id ?? wallet?.wallet_id,
+                            balance: wallet?.balance ?? wallet?.kcc_balance ?? '0',
+                            handle: wallet?.handle ?? wallet?.wallet_handle ?? key
+                        }
+                    };
+                }
+            } catch (err) {
+                if (err.response) lastResponse = err.response;
+            }
+        }
+
+        const err = new Error('Wallet not found for this account.');
+        err.response = lastResponse;
+        throw err;
+    }
+
     async transferCoins(token, recipientHandle, amount, note) {
         try {
             const base = this.getBigKAdminBase();

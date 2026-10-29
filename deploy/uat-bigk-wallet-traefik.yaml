@@ -1,0 +1,15 @@
+# Append to /data/coolify/proxy/dynamic/uat-routes.yaml (Traefik file provider).
+# Routes wallet traffic on uat-api.bigkpay.com → Kincore API (CORS + /api/v1 proxy).
+#
+#   bigk-wallet-via-kincore:
+#     rule: "Host(`uat-api.bigkpay.com`) && PathPrefix(`/api/wallet`)"
+#     entryPoints: [https]
+#     tls: {}
+#     priority: 200
+#     service: kincore-api-uat-svc
+#   bigk-wallet-via-kincore-http:
+#     rule: "Host(`uat-api.bigkpay.com`) && PathPrefix(`/api/wallet`)"
+#     entryPoints: [http]
+#     middlewares: [redirect-to-https]
+#     priority: 200
+#     service: kincore-api-uat-svc
