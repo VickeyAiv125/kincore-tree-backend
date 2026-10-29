@@ -2,6 +2,7 @@ import { supabase } from '../../config/supabaseClient.js';
 import { logActivity } from '../../utils/logger.js';
 import { sendEmail } from '../../services/emailService.js';
 import { assertParentChildDob } from '../utils/parentChildDob.js';
+import { enrichPersonWithAccountDob, fillPersonsDobFromUsers } from '../utils/personDobEnrichment.js';
 
 const PARENT_ROLES = new Set(['father', 'mother', 'parent']);
 const PARENT_LINKS = new Set(['biological', 'adoptive', 'step-parent', 'foster', 'guardian', 'unknown']);
@@ -116,7 +117,7 @@ async function getTargetPerson(targetPersonId, familySpaceId) {
         .maybeSingle();
 
     if (error) throw error;
-    return data;
+    return enrichPersonWithAccountDob(data);
 }
 
 const normalizePersonEmail = (email) => {
@@ -964,6 +965,8 @@ export const getTreeData = async (req, res) => {
             }
             return false;
         };
+
+        await fillPersonsDobFromUsers(allPersons);
 
         if (settings.sensitiveDataRedaction) {
             allPersons.forEach(p => {

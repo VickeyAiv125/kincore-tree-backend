@@ -11,6 +11,7 @@ import {
 } from '../../utils/familyRolePolicy.js';
 import { loadFamilyKccLedger, summarizeKccRows } from '../../utils/familyKccLedger.js';
 import { assertParentChildDob } from '../../shared/utils/parentChildDob.js';
+import { enrichPersonWithAccountDob } from '../../shared/utils/personDobEnrichment.js';
 
 const ADMIN_ROLES = ['owner', 'admin', 'manager', 'editor', 'branch', 'branch-admin', 'family', 'family-admin', 'family_admin', 'co-admin'];
 const OWNER_ROLES = ['owner'];
@@ -2150,11 +2151,12 @@ export const resolveFamilyAdminBranchApproval = async (req, res) => {
                 } = request.proposed_value;
 
                 if (request.request_type === 'add_parent' || request.request_type === 'add_child') {
-                    const { data: targetPerson } = await supabase
+                    const { data: targetRow } = await supabase
                         .from('persons')
-                        .select('id, first_name, last_name, full_name, date_of_birth, birth_date')
+                        .select('id, first_name, last_name, full_name, date_of_birth, birth_date, claimed_by, user_id')
                         .eq('id', target_person_id)
                         .maybeSingle();
+                    const targetPerson = await enrichPersonWithAccountDob(targetRow);
                     try {
                         assertParentChildDob({
                             role: request.request_type === 'add_parent' ? 'parent' : 'child',

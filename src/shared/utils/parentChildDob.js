@@ -14,7 +14,16 @@ const parseDobValue = (raw) => {
     }
     const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (slash) {
-        const d = new Date(Date.UTC(+slash[3], +slash[1] - 1, +slash[2], 12));
+        let month = +slash[1];
+        let day = +slash[2];
+        const year = +slash[3];
+        // Prefer DD/MM/YYYY when the first segment cannot be a month (e.g. 26/09/1997).
+        if (month > 12 && day <= 12) {
+            const tmp = month;
+            month = day;
+            day = tmp;
+        }
+        const d = new Date(Date.UTC(year, month - 1, day, 12));
         return Number.isNaN(d.getTime()) ? null : d;
     }
     const d = new Date(s);
