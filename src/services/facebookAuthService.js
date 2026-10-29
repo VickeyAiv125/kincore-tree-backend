@@ -15,6 +15,7 @@ import {
     saveFacebookOAuthState,
     saveFacebookPending
 } from '../utils/oauthHandoffStore.js';
+import { signOAuthPayload, verifyOAuthPayload } from '../utils/oauthSignedPayload.js';
 
 const GRAPH_VERSION = 'v21.0';
 
@@ -39,7 +40,16 @@ export const getFacebookClientConfig = () => {
     return { appId, appSecret, redirectUri, frontendUrl };
 };
 
+const FACEBOOK_PENDING_TTL_MS = 2 * 60 * 60 * 1000;
+const FACEBOOK_STATE_TTL_MS = 15 * 60 * 1000;
+
 export const createFacebookOAuthState = (meta = {}) => {
+    const signed = signOAuthPayload(
+        { ...meta, nonce: crypto.randomBytes(12).toString('hex') },
+        FACEBOOK_STATE_TTL_MS
+    );
+    if (signed) return signed;
+
     const state = crypto.randomBytes(24).toString('hex');
     saveFacebookOAuthState(state, meta);
     return state;
@@ -266,14 +276,32 @@ const classifyFacebookProfile = async (profile) => {
 };
 
 const savePending = (row) => {
+    const payload = { ...row, createdAt: Date.now() };
+    const signed = signOAuthPayload(payload, FACEBOOK_PENDING_TTL_MS);
+    if (signed) return signed;
+
     const id = crypto.randomBytes(24).toString('hex');
-    saveFacebookPending(id, { ...row, createdAt: Date.now() });
+    saveFacebookPending(id, payload);
     return id;
 };
 
-const readPending = (id) => readFacebookPending(id);
+const readPending = (tokenOrId) => {
+    const key = String(tokenOrId || '').trim();
+    if (!key) return null;
+    const signed = verifyOAuthPayload(key);
+    if (signed) return signed;
+    return readFacebookPending(key);
+};
 
-const writePending = (id, row) => saveFacebookPending(id, row);
+const writePending = (_tokenOrId, row) => {
+    const payload = { ...row, updatedAt: Date.now() };
+    const signed = signOAuthPayload(payload, FACEBOOK_PENDING_TTL_MS);
+    if (signed) return signed;
+
+    const id = String(_tokenOrId || '').trim() || crypto.randomBytes(24).toString('hex');
+    saveFacebookPending(id, payload);
+    return id;
+};
 
 const stepPage = ({ title, intro, error, pendingId, hidden = {}, fields = '', submitLabel }) => `<!doctype html>
 <html lang="en">
@@ -298,6 +326,7 @@ const stepPage = ({ title, intro, error, pendingId, hidden = {}, fields = '', su
     <p>${esc(intro)}</p>
     ${error ? `<div class="error">${esc(error)}</div>` : ''}
     <form method="post" action="/api/auth/facebook/continue">
+      <input type="hidden" name="pending_token" value="${esc(pendingId)}" />
       <input type="hidden" name="pending_id" value="${esc(pendingId)}" />
       ${Object.entries(hidden).map(([key, value]) => `<input type="hidden" name="${esc(key)}" value="${esc(value)}" />`).join('')}
       ${fields}
@@ -441,7 +470,7 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
 };
 
 const resolveFacebookPending = (body = {}) => {
-    let pendingId = String(body.pending_id || '').trim();
+    let pendingId = String(body.pending_token || body.pending_id || '').trim();
     let pending = pendingId ? readPending(pendingId) : null;
     if (!pending) {
         const recoveryEmail = String(body.pending_email || body.email || '').trim().toLowerCase();
@@ -470,9 +499,9 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.otp = otp;
         pending.otpExpiresAt = Date.now() + 10 * 60 * 1000;
         pending.action = 'verify_email';
-        writePending(pendingId, pending);
+        const nextToken = writePending(pendingId, pending);
         await sendFacebookOtp({ to: email, otp, firstName: pending.profile.firstName });
-        return { kind: 'html', html: pageForPending(pendingId, pending) };
+        return { kind: 'html', html: pageForPending(nextToken, pending) };
     }
 
     if (action === 'verify_email') {

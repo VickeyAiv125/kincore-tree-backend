@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { signOAuthPayload, verifyOAuthPayload } from './oauthSignedPayload.js';
 
 const TTL_MS = 15 * 60 * 1000;
 const FACEBOOK_PENDING_TTL_MS = 2 * 60 * 60 * 1000;
@@ -86,6 +87,12 @@ export const cacheOAuthRedirectForCode = (code, redirectUrl) => {
 };
 
 export const createOAuthHandoffTicket = ({ token, provider }) => {
+    const signed = signOAuthPayload(
+        { token, provider: provider || 'google' },
+        TTL_MS
+    );
+    if (signed) return signed;
+
     const ticket = crypto.randomBytes(18).toString('hex');
     withStore((data, now) => {
         data.tickets[ticket] = {
@@ -101,6 +108,12 @@ export const createOAuthHandoffTicket = ({ token, provider }) => {
 export const readOAuthHandoffTicket = (ticket) => {
     const key = String(ticket || '').trim();
     if (!key) return null;
+
+    const signed = verifyOAuthPayload(key);
+    if (signed?.token) {
+        return { token: signed.token, provider: signed.provider || 'google' };
+    }
+
     return withStore((data) => data.tickets[key] || null);
 };
 
@@ -117,6 +130,10 @@ export const saveFacebookOAuthState = (state, meta = {}) => {
 export const consumeFacebookOAuthStateRecord = (state) => {
     const key = String(state || '').trim();
     if (!key) return null;
+
+    const signed = verifyOAuthPayload(key);
+    if (signed) return signed;
+
     return withStore((data) => {
         const meta = data.facebookStates[key] || null;
         if (meta) delete data.facebookStates[key];

@@ -47,6 +47,7 @@ jobs:
               exit 1
             fi
             docker cp /tmp/kincore-api-src/. "${CONTAINER}:/app/"
+            docker exec "$CONTAINER" mkdir -p /app/oauth-handoff
             docker exec "$CONTAINER" npm ci --omit=dev
             docker restart "$CONTAINER"
             sleep 4
