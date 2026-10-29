@@ -66,10 +66,9 @@ export const facebookPlaceholderEmail = (facebookUserId) =>
 
 const placeholderEmailEnabled = () => {
     const raw = trimEnv(process.env.FACEBOOK_PLACEHOLDER_EMAIL).toLowerCase();
-    if (['0', 'false', 'no'].includes(raw)) return false;
     if (['1', 'true', 'yes'].includes(raw)) return true;
-    // UAT: Meta often grants email scope but returns no address without Advanced Access.
-    return trimEnv(process.env.BACKEND_URL).includes('uat-api.kincore.com');
+    // Default off: when Facebook omits email, collect and verify a real address first.
+    return false;
 };
 
 const facebookEmailHelpMessage = async (accessToken) => {
@@ -311,7 +310,7 @@ const pageForPending = (pendingId, pending, error = '') => {
     if (pending.action === 'need_email') {
         return stepPage({
             title: 'Add your email',
-            intro: 'Facebook did not share an email. Enter an email and verify it before you can continue.',
+            intro: 'Facebook did not share an email. Enter an email and verify it before completing registration or linking.',
             error,
             pendingId,
             hidden: { action: 'request_email' },
@@ -362,6 +361,9 @@ const ensureFacebookAccount = async ({ email, profile }) => {
 };
 
 const completeFacebookSignIn = async (pending, pendingId) => {
+    if (pending.requireEmailVerification && !pending.emailVerified) {
+        throw new Error('Verify your email before completing registration or linking.');
+    }
     const email = String(pending.email || pending.pendingEmail || '').trim().toLowerCase();
     if (!isUsableFacebookEmail(email)) {
         throw new Error('A valid email is required to finish Facebook sign-in.');
@@ -427,7 +429,9 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
         code,
         action: decision.action,
         email: decision.email || '',
-        userId: decision.userId || null
+        userId: decision.userId || null,
+        requireEmailVerification: decision.action === 'need_email',
+        emailVerified: false
     });
     return { kind: 'html', html: pageForPending(pendingId, readPending(pendingId)) };
 };
@@ -460,6 +464,7 @@ export const continueFacebookSignIn = async (body = {}) => {
         }
         pending.email = pending.pendingEmail;
         pending.otp = null;
+        pending.emailVerified = true;
         const existing = await findUserByEmail(pending.email);
         pending.userId = existing?.id || null;
         writePending(body.pending_id, pending);
