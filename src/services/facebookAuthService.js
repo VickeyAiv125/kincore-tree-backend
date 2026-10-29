@@ -218,7 +218,7 @@ const attachFacebookSub = async (userId, profile) => {
     const prev = data?.user?.user_metadata || {};
     const existing = String(prev.facebook_sub || '');
     if (existing && existing !== String(profile.sub)) {
-        throw new Error('This KCC ID is already linked to a different Facebook account.');
+        throw new Error('This account is already linked to a different Facebook account.');
     }
     const { error: updateError } = await supabase.auth.admin.updateUserById(userId, {
         user_metadata: {
@@ -311,7 +311,7 @@ const pageForPending = (pendingId, pending, error = '') => {
     if (pending.action === 'need_email') {
         return stepPage({
             title: 'Add your email',
-            intro: 'Facebook did not share an email. Enter an email and verify it before registration or linking can continue.',
+            intro: 'Facebook did not share an email. Enter an email and verify it before you can continue.',
             error,
             pendingId,
             hidden: { action: 'request_email' },
@@ -330,31 +330,60 @@ const pageForPending = (pendingId, pending, error = '') => {
             submitLabel: 'Verify email'
         });
     }
-    if (pending.action === 'link') {
-        return stepPage({
-            title: 'Link Facebook to your KCC ID',
-            intro: `${pending.email} already has a KCC ID, and this Facebook account is not linked to it. Sign in to that KCC ID to confirm linking.`,
-            error,
-            pendingId,
-            hidden: { action: 'link' },
-            fields: `<label>Email</label><input value="${esc(pending.email)}" disabled /><label>KCC ID password</label><input name="password" type="password" autocomplete="current-password" required />`,
-            submitLabel: 'Sign in and link Facebook'
-        });
-    }
     return stepPage({
-        title: 'Create your KCC ID',
-        intro: 'No KCC ID matches this Facebook account. Continue registration to create one.',
-        error,
+        title: 'Finish Facebook sign-in',
+        intro: 'We could not finish automatically. Close this page, return to Kincore, and tap Facebook again.',
+        error: error || 'This step is no longer needed. Start Facebook sign-in again from the app.',
         pendingId,
-        hidden: { action: 'register' },
-        fields: `
-          <label>First name</label><input name="first_name" value="${esc(pending.profile.firstName || '')}" required />
-          <label>Last name</label><input name="last_name" value="${esc(pending.profile.lastName || '')}" required />
-          <label>Email</label><input name="email" type="email" value="${esc(pending.email || '')}" ${pending.email ? 'readonly' : 'required'} />
-          <label>Password</label><input name="password" type="password" autocomplete="new-password" minlength="8" required />
-        `,
-        submitLabel: 'Create account'
+        hidden: { action: 'noop' },
+        fields: '',
+        submitLabel: 'Close'
     });
+};
+
+const ensureFacebookAccount = async ({ email, profile }) => {
+    const existing = await findUserByEmail(email);
+    if (existing?.id) return existing.id;
+    const { AuthService } = await import('./authService.js');
+    const password = crypto.randomBytes(24).toString('base64url');
+    try {
+        await AuthService.signup({
+            email,
+            password,
+            first_name: profile.firstName || '',
+            last_name: profile.lastName || '',
+            auto_verify: true
+        });
+    } catch (err) {
+        if (!/already exists/i.test(String(err.message || ''))) throw err;
+    }
+    const row = await findUserByEmail(email);
+    return row?.id || null;
+};
+
+const completeFacebookSignIn = async (pending, pendingId) => {
+    const email = String(pending.email || pending.pendingEmail || '').trim().toLowerCase();
+    if (!isUsableFacebookEmail(email)) {
+        throw new Error('A valid email is required to finish Facebook sign-in.');
+    }
+    const userId = pending.userId || (await findUserByEmail(email))?.id || await ensureFacebookAccount({
+        email,
+        profile: pending.profile
+    });
+    const token = await issueFacebookSession({
+        email,
+        clientType: pending.clientType,
+        profile: pending.profile,
+        userId
+    });
+    if (pendingId) deleteFacebookPending(pendingId);
+    return {
+        kind: 'token',
+        token,
+        clientType: pending.clientType,
+        redirectTo: pending.redirectTo,
+        code: pending.code
+    };
 };
 
 const sendFacebookOtp = async ({ to, otp, firstName }) => {
@@ -378,6 +407,16 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
             clientType,
             profile,
             userId: decision.userId
+        });
+        return { kind: 'token', token };
+    }
+    if (decision.action === 'register') {
+        await ensureFacebookAccount({ email: decision.email, profile });
+        const token = await issueFacebookSession({
+            email: decision.email,
+            clientType,
+            profile,
+            userId: null
         });
         return { kind: 'token', token };
     }
@@ -422,94 +461,21 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.email = pending.pendingEmail;
         pending.otp = null;
         const existing = await findUserByEmail(pending.email);
-        if (existing?.id) {
-            pending.action = 'link';
-            pending.userId = existing.id;
-        } else {
-            pending.action = 'register';
-            pending.userId = null;
-        }
+        pending.userId = existing?.id || null;
         writePending(body.pending_id, pending);
-        return { kind: 'html', html: pageForPending(body.pending_id, pending) };
-    }
-
-    if (action === 'link') {
-        const password = String(body.password || '');
-        if (!password) return fail('Enter the password for this KCC ID.');
-        const { loginWithKccId } = await import('./kccAuthService.js');
-        let token = null;
-        let userId = pending.userId;
         try {
-            const kcc = await loginWithKccId({ identifier: pending.email, password });
-            token = kcc.token;
-            userId = kcc.user?.id || userId;
-        } catch {
-            const { AuthService } = await import('./authService.js');
-            try {
-                const local = await AuthService.login({ email: pending.email, password });
-                token = local.token;
-                userId = local.user?.id || userId;
-            } catch {
-                return fail('That password did not match this KCC ID. Sign in to the existing account to link Facebook.');
-            }
-        }
-        try {
-            if (userId) await attachFacebookSub(userId, pending.profile);
+            return await completeFacebookSignIn(pending, body.pending_id);
         } catch (err) {
             return fail(err.message);
         }
-        deleteFacebookPending(body.pending_id);
-        return {
-            kind: 'token',
-            token,
-            clientType: pending.clientType,
-            redirectTo: pending.redirectTo,
-            code: pending.code
-        };
     }
 
-    if (action === 'register') {
-        const email = isUsableFacebookEmail(pending.email)
-            ? pending.email
-            : String(body.email || '').trim().toLowerCase();
-        const password = String(body.password || '');
-        const firstName = String(body.first_name || pending.profile.firstName || '').trim();
-        const lastName = String(body.last_name || pending.profile.lastName || '').trim();
-        if (!isUsableFacebookEmail(email)) return fail('A valid email is required.');
-        if (password.length < 8) return fail('Use a password of at least 8 characters.');
-        const existing = await findUserByEmail(email);
-        if (existing?.id) {
-            pending.email = email;
-            pending.action = 'link';
-            pending.userId = existing.id;
-            writePending(body.pending_id, pending);
-            return {
-                kind: 'html',
-                html: pageForPending(body.pending_id, pending, 'That email already has a KCC ID. Sign in to link Facebook.')
-            };
+    if (action === 'link' || action === 'register') {
+        try {
+            return await completeFacebookSignIn(pending, body.pending_id);
+        } catch (err) {
+            return fail(err.message);
         }
-        const { AuthService } = await import('./authService.js');
-        await AuthService.signup({
-            email,
-            password,
-            first_name: firstName,
-            last_name: lastName,
-            auto_verify: true
-        });
-        const token = await issueFacebookSession({
-            email,
-            clientType: pending.clientType,
-            profile: { ...pending.profile, firstName, lastName, email },
-            userId: null
-        });
-        deleteFacebookPending(body.pending_id);
-        return {
-            kind: 'token',
-            token,
-            clientType: pending.clientType,
-            redirectTo: pending.redirectTo,
-            code: pending.code
-        };
     }
 
     return fail('This Facebook step is no longer valid. Start Facebook sign-in again.');
