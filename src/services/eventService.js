@@ -622,11 +622,12 @@ export const EventService = {
             updateData.invite_methods = { ...currentMethods, ...extras };
         }
 
-        const data = await updateEventRow(id, {
-            ...pickEventRow(updateData),
-            cover_photo_url: coverImageUrl,
-            cover_image: coverImageUrl
-        });
+        const row = { ...pickEventRow(updateData) };
+        if (coverImageUrl) {
+            row.cover_photo_url = coverImageUrl;
+            row.cover_image = coverImageUrl;
+        }
+        const data = await updateEventRow(id, row);
         Object.assign(data, extras);
 
         // 3. Handle Account Invitations Sync (Standard DB Table)

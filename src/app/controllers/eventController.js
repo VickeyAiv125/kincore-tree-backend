@@ -75,8 +75,16 @@ export const createEvent = async (req, res) => {
 export const updateEvent = async (req, res) => {
     try {
         const { id } = req.params;
-        const data = await EventService.updateEvent(id, req.body);
-        res.json(data);
+        const data = await EventService.updateEvent(id, req.body, req.file);
+        const event = await EventService.getEventById(id, req.user?.id);
+        await logActivity({
+            actor_id: req.user.id,
+            action: 'UPDATE_EVENT',
+            target_type: 'events',
+            target_id: id,
+            details: { title: event?.title || data?.title }
+        });
+        res.json(event || data);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -85,8 +93,16 @@ export const updateEvent = async (req, res) => {
 export const deleteEvent = async (req, res) => {
     try {
         const { id } = req.params;
+        const title = req.eventRecord?.title || null;
         await EventService.deleteEvent(id);
-        res.json({ message: 'Event deleted' });
+        await logActivity({
+            actor_id: req.user.id,
+            action: 'DELETE_EVENT',
+            target_type: 'events',
+            target_id: id,
+            details: { title }
+        });
+        res.json({ message: 'Event deleted', event_id: id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
