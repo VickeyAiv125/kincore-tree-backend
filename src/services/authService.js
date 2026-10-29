@@ -728,14 +728,19 @@ export const AuthService = {
         let userObj = null;
         let sessionAccessToken = access_token || null;
 
-        // Facebook/Google return a short ticket, not the session JWT.
-        if (sessionAccessToken && !String(sessionAccessToken).includes('.')) {
+        // Facebook/Google return a handoff ticket (hex or signed `payload.sig`), not the session JWT.
+        if (sessionAccessToken) {
             const { readOAuthHandoffTicket } = await import('../utils/oauthHandoffStore.js');
             const handed = readOAuthHandoffTicket(sessionAccessToken);
-            if (!handed?.token) {
-                throw new Error('Invalid or expired OAuth access token.');
+            if (handed?.token) {
+                sessionAccessToken = handed.token;
+            } else {
+                const parts = String(sessionAccessToken).split('.');
+                const looksLikeSupabaseJwt = parts.length === 3;
+                if (!looksLikeSupabaseJwt) {
+                    throw new Error('Invalid or expired OAuth access token.');
+                }
             }
-            sessionAccessToken = handed.token;
         }
 
         // Native mobile Google: exchange Google ID token → Supabase session

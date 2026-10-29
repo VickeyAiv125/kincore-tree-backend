@@ -17,26 +17,56 @@ class ClientApiService {
     // --- Wallet / KCC Methods ---
 
     async getWalletDetails(token) {
-        try {
-            const response = await this.api.get('/app/me', {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            return response.data; // Expected: { wallet: { balance, wallet_id, handle } }
-        } catch (err) {
-            console.error('Error fetching external wallet:', err.message);
-            throw err;
+        const base = this.getBigKAdminBase();
+        const bearer = String(token || '').replace(/^Bearer\s+/i, '').trim();
+        const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/json' };
+        const paths = ['/wallet/me', '/app/me'];
+        let lastResponse = null;
+
+        for (const path of paths) {
+            try {
+                const response = await axios.get(`${base}${path}`, {
+                    headers,
+                    timeout: 15000,
+                    validateStatus: () => true
+                });
+                if (response.status >= 200 && response.status < 300) {
+                    return response.data;
+                }
+                lastResponse = response;
+                if (response.status !== 404) {
+                    const err = new Error(`BigK wallet ${response.status}`);
+                    err.response = response;
+                    throw err;
+                }
+            } catch (err) {
+                if (err.response) {
+                    lastResponse = err.response;
+                    if (err.response.status !== 404) throw err;
+                    continue;
+                }
+                console.error('Error fetching external wallet:', err.message);
+                throw err;
+            }
         }
+
+        const err = new Error('Wallet endpoint not found on BigK');
+        err.response = lastResponse;
+        throw err;
     }
 
     async transferCoins(token, recipientHandle, amount, note) {
         try {
-            const response = await this.api.post('/app/transfer', {
-                recipient_handle: recipientHandle,
-                amount,
-                note
-            }, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
+            const base = this.getBigKAdminBase();
+            const bearer = String(token || '').replace(/^Bearer\s+/i, '').trim();
+            const response = await axios.post(
+                `${base}/app/transfer`,
+                { recipient_handle: recipientHandle, amount, note },
+                {
+                    headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
+                    timeout: 15000
+                }
+            );
             return response.data;
         } catch (err) {
             console.error('Error performing external transfer:', err.message);
