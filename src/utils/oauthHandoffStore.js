@@ -7,13 +7,15 @@ import fs from 'fs';
 import path from 'path';
 
 const TTL_MS = 15 * 60 * 1000;
-const FILE = process.env.OAUTH_STORE_PATH || '/tmp/kincore-oauth-store.json';
+const FACEBOOK_PENDING_TTL_MS = 2 * 60 * 60 * 1000;
+const FILE = process.env.OAUTH_STORE_PATH || '/app/oauth-handoff/kincore-oauth-store.json';
 
 const empty = () => ({
     redirects: {},
     tickets: {},
     facebookStates: {},
-    facebookPending: {}
+    facebookPending: {},
+    facebookPendingByEmail: {}
 });
 
 const readAll = () => {
@@ -36,23 +38,37 @@ const writeAll = (data) => {
     }
 };
 
-const pruneBucket = (bucket, now) => {
+const rowAge = (row, now) => {
+    const at = row?.updatedAt || row?.at || row?.createdAt || 0;
+    if (!at) return Number.POSITIVE_INFINITY;
+    return now - at;
+};
+
+const pruneBucket = (bucket, now, ttlMs = TTL_MS, exceptKeys = []) => {
     for (const [key, row] of Object.entries(bucket || {})) {
-        const at = row?.at || row?.createdAt || 0;
-        if (!at || now - at > TTL_MS) delete bucket[key];
+        if (exceptKeys.includes(key)) continue;
+        if (rowAge(row, now) > ttlMs) delete bucket[key];
     }
 };
 
-const withStore = (mutator) => {
+const withStore = (mutator, options = {}) => {
     const data = readAll();
     const now = Date.now();
+    const keepPending = options.keepPendingKeys || [];
     pruneBucket(data.redirects, now);
     pruneBucket(data.tickets, now);
     pruneBucket(data.facebookStates, now);
-    pruneBucket(data.facebookPending, now);
+    pruneBucket(data.facebookPending, now, FACEBOOK_PENDING_TTL_MS, keepPending);
+    pruneBucket(data.facebookPendingByEmail, now, FACEBOOK_PENDING_TTL_MS);
     const result = mutator(data, now);
     writeAll(data);
     return result;
+};
+
+const indexFacebookPendingEmail = (data, id, row, now) => {
+    const email = String(row?.pendingEmail || row?.email || '').trim().toLowerCase();
+    if (!email.includes('@')) return;
+    data.facebookPendingByEmail[email] = { id, updatedAt: now };
 };
 
 export const getCachedOAuthRedirectForCode = (code) => {
@@ -112,20 +128,58 @@ export const saveFacebookPending = (id, row) => {
     const key = String(id || '').trim();
     if (!key) return;
     withStore((data, now) => {
-        data.facebookPending[key] = { ...row, createdAt: row.createdAt || now };
+        const createdAt = row.createdAt || now;
+        const next = { ...row, createdAt, updatedAt: now };
+        data.facebookPending[key] = next;
+        indexFacebookPendingEmail(data, key, next, now);
     });
 };
 
 export const readFacebookPending = (id) => {
     const key = String(id || '').trim();
     if (!key) return null;
-    return withStore((data) => data.facebookPending[key] || null);
+    return withStore((data, now) => {
+        const row = data.facebookPending[key];
+        if (!row) return null;
+        row.updatedAt = now;
+        data.facebookPending[key] = row;
+        indexFacebookPendingEmail(data, key, row, now);
+        return row;
+    }, { keepPendingKeys: [key] });
+};
+
+export const readFacebookPendingByEmail = (email) => {
+    const clean = String(email || '').trim().toLowerCase();
+    if (!clean.includes('@')) return null;
+    const snapshot = readAll();
+    const keepPendingKeys = snapshot.facebookPendingByEmail?.[clean]?.id
+        ? [snapshot.facebookPendingByEmail[clean].id]
+        : [];
+    return withStore((data, now) => {
+        const pointer = data.facebookPendingByEmail[clean];
+        if (!pointer?.id) return null;
+        const row = data.facebookPending[pointer.id];
+        if (!row) {
+            delete data.facebookPendingByEmail[clean];
+            return null;
+        }
+        row.updatedAt = now;
+        pointer.updatedAt = now;
+        data.facebookPending[pointer.id] = row;
+        data.facebookPendingByEmail[clean] = pointer;
+        return { id: pointer.id, row };
+    }, { keepPendingKeys });
 };
 
 export const deleteFacebookPending = (id) => {
     const key = String(id || '').trim();
     if (!key) return;
     withStore((data) => {
+        const row = data.facebookPending[key];
         delete data.facebookPending[key];
+        const email = String(row?.pendingEmail || row?.email || '').trim().toLowerCase();
+        if (email && data.facebookPendingByEmail?.[email]?.id === key) {
+            delete data.facebookPendingByEmail[email];
+        }
     });
 };

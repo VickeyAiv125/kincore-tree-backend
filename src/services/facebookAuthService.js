@@ -11,6 +11,7 @@ import {
     consumeFacebookOAuthStateRecord,
     deleteFacebookPending,
     readFacebookPending,
+    readFacebookPendingByEmail,
     saveFacebookOAuthState,
     saveFacebookPending
 } from '../utils/oauthHandoffStore.js';
@@ -324,7 +325,10 @@ const pageForPending = (pendingId, pending, error = '') => {
             intro: `Enter the 6-digit code sent to ${pending.pendingEmail}.`,
             error,
             pendingId,
-            hidden: { action: 'verify_email' },
+            hidden: {
+                action: 'verify_email',
+                pending_email: pending.pendingEmail || pending.email || ''
+            },
             fields: '<label>Verification code</label><input name="otp" inputmode="numeric" autocomplete="one-time-code" required />',
             submitLabel: 'Verify email'
         });
@@ -436,12 +440,26 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
     return { kind: 'html', html: pageForPending(pendingId, readPending(pendingId)) };
 };
 
-export const continueFacebookSignIn = async (body = {}) => {
-    const pending = readPending(body.pending_id);
+const resolveFacebookPending = (body = {}) => {
+    let pendingId = String(body.pending_id || '').trim();
+    let pending = pendingId ? readPending(pendingId) : null;
     if (!pending) {
+        const recoveryEmail = String(body.pending_email || body.email || '').trim().toLowerCase();
+        const recovered = readFacebookPendingByEmail(recoveryEmail);
+        if (recovered?.row) {
+            pending = recovered.row;
+            pendingId = recovered.id;
+        }
+    }
+    return { pending, pendingId };
+};
+
+export const continueFacebookSignIn = async (body = {}) => {
+    const { pending, pendingId } = resolveFacebookPending(body);
+    if (!pending || !pendingId) {
         throw new Error('This Facebook sign-in expired. Return to Kincore and tap Facebook again.');
     }
-    const fail = (message) => ({ kind: 'html', html: pageForPending(body.pending_id, pending, message) });
+    const fail = (message) => ({ kind: 'html', html: pageForPending(pendingId, pending, message) });
     const action = String(body.action || pending.action || '');
 
     if (action === 'request_email') {
@@ -452,9 +470,9 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.otp = otp;
         pending.otpExpiresAt = Date.now() + 10 * 60 * 1000;
         pending.action = 'verify_email';
-        writePending(body.pending_id, pending);
+        writePending(pendingId, pending);
         await sendFacebookOtp({ to: email, otp, firstName: pending.profile.firstName });
-        return { kind: 'html', html: pageForPending(body.pending_id, pending) };
+        return { kind: 'html', html: pageForPending(pendingId, pending) };
     }
 
     if (action === 'verify_email') {
@@ -467,9 +485,9 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.emailVerified = true;
         const existing = await findUserByEmail(pending.email);
         pending.userId = existing?.id || null;
-        writePending(body.pending_id, pending);
+        writePending(pendingId, pending);
         try {
-            return await completeFacebookSignIn(pending, body.pending_id);
+            return await completeFacebookSignIn(pending, pendingId);
         } catch (err) {
             return fail(err.message);
         }
@@ -477,7 +495,7 @@ export const continueFacebookSignIn = async (body = {}) => {
 
     if (action === 'link' || action === 'register') {
         try {
-            return await completeFacebookSignIn(pending, body.pending_id);
+            return await completeFacebookSignIn(pending, pendingId);
         } catch (err) {
             return fail(err.message);
         }
