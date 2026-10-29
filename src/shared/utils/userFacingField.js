@@ -3,7 +3,7 @@ const LABELS = {
     start_date: 'Start Date',
     end_date: 'End Date',
     title: 'Event name',
-    event_time: 'Event time',
+    event_time: 'Start Time',
     location: 'Location',
     draw_date: 'Draw Date & Time',
     gift_deadline: 'Gift Exchange / Delivery Date',

@@ -1,6 +1,11 @@
 import { supabase } from '../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../config/storageClient.js';
 import { requiredFieldMessage } from '../shared/utils/userFacingField.js';
+import {
+    normalizeEventCreateInput,
+    eventTimeText,
+    hasStartDateHint
+} from '../shared/utils/eventDateNormalize.js';
 
 const EVENT_COLUMNS = new Set([
     'family_space_id',
@@ -353,6 +358,8 @@ export const EventService = {
     },
 
     async createEvent(eventData, coverFile = null) {
+        eventData = normalizeEventCreateInput(eventData);
+
         let { 
             invited_user_ids, 
             is_secret_santa, 
@@ -384,7 +391,16 @@ export const EventService = {
 
         if (!insertData.family_space_id) throw new Error(requiredFieldMessage('family_space_id'));
         if (!insertData.title) throw new Error(requiredFieldMessage('title'));
-        if (!insertData.start_date) throw new Error(requiredFieldMessage('start_date'));
+        if (!insertData.start_date) {
+            const timeRaw = eventTimeText(eventData);
+            if (!timeRaw) {
+                throw new Error(requiredFieldMessage('event_time'));
+            }
+            if (!hasStartDateHint(eventData)) {
+                throw new Error(requiredFieldMessage('start_date'));
+            }
+            throw new Error(requiredFieldMessage('start_date'));
+        }
 
         const includeGift = toBool(insertData.include_gift_exchange) || toBool(is_secret_santa);
         const sendReminders = toBool(insertData.send_reminders);
