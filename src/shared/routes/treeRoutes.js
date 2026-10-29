@@ -6,6 +6,7 @@ import {
     addChild,
     addFamilyMember,
     updatePerson,
+    deletePerson,
     getTreeWebviewUrl
 } from '../controllers/treeController.js';
 import { authMiddleware } from '../../middleware/authMiddleware.js';
@@ -39,6 +40,7 @@ router.post('/add-parent', authMiddleware, requireFamilyRole('family_space_id', 
 router.post('/add-child', authMiddleware, requireFamilyRole('family_space_id', ['owner', 'admin', 'branch-admin', 'editor', 'member']), addChild);
 router.post('/add-member', authMiddleware, requireFamilyRole('family_space_id', ['owner', 'admin', 'branch-admin', 'editor', 'member']), addFamilyMember);
 router.patch('/person/:person_id', authMiddleware, requireFamilyRole('family_space_id', ['owner', 'admin', 'branch-admin', 'editor', 'member']), updatePerson);
+router.delete('/person/:person_id', authMiddleware, requireFamilyRole('family_space_id', ['owner', 'admin', 'branch-admin', 'editor', 'member']), deletePerson);
 
 // Search is available to all members
 router.get('/search', authMiddleware, searchTreeMembers);

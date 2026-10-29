@@ -807,6 +807,7 @@ export const getTreeData = async (req, res) => {
         const personIdsSeen = new Set();
         const allPersons = [];
         for (const p of [...(pDirect || []), ...personsFromTree]) {
+            if (p.status === 'deleted') continue;
             if (!personIdsSeen.has(p.id)) {
                 personIdsSeen.add(p.id);
                 allPersons.push(p);
@@ -1023,6 +1024,85 @@ export const getTreeData = async (req, res) => {
             family_name: familyName,
         });
 
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * Remove a person from the family tree (wrong add / cleanup).
+ * DELETE /clantree/person/:person_id  body: { family_space_id }
+ */
+export const deletePerson = async (req, res) => {
+    try {
+        const { person_id: personId } = req.params;
+        const { family_space_id: familySpaceId } = req.body || {};
+        const { user, familyRole } = req;
+
+        if (!familySpaceId || !personId) {
+            return res.status(400).json({ error: 'family_space_id is required' });
+        }
+
+        const { data: person, error: personErr } = await supabase
+            .from('persons')
+            .select('id, family_space_id, full_name, first_name, last_name, claimed_by, status')
+            .eq('id', personId)
+            .eq('family_space_id', familySpaceId)
+            .maybeSingle();
+
+        if (personErr) throw personErr;
+        if (!person || person.status === 'deleted') {
+            return res.status(404).json({ error: 'Person not found in this family tree' });
+        }
+
+        const adminRoles = new Set(['owner', 'admin', 'co-admin', 'family-admin', 'super_admin']);
+        if (person.claimed_by && !adminRoles.has(familyRole)) {
+            return res.status(403).json({
+                error: 'This profile is linked to a member account. Only a family admin can remove it from the tree.'
+            });
+        }
+
+        const governance = await handleAdminControlledPending(
+            user,
+            familyRole,
+            familySpaceId,
+            'delete_member',
+            { person_id: personId },
+            person
+        );
+        if (governance?.blocked) {
+            return res.status(400).json({ error: governance.message, message: governance.message });
+        }
+        if (governance?.intercepted) {
+            return res.status(202).json({ message: `Removal sent to ${governance.target} for approval.` });
+        }
+
+        await supabase
+            .from('person_relations')
+            .delete()
+            .or(`person_id_1.eq.${personId},person_id_2.eq.${personId}`);
+
+        await supabase
+            .from('person_relationships')
+            .delete()
+            .or(`person_id.eq.${personId},related_person_id.eq.${personId}`);
+
+        if (person.claimed_by) {
+            const { error: softErr } = await supabase
+                .from('persons')
+                .update({ status: 'deleted', updated_at: new Date().toISOString() })
+                .eq('id', personId);
+            if (softErr) throw softErr;
+        } else {
+            const { error: delErr } = await supabase
+                .from('persons')
+                .delete()
+                .eq('id', personId);
+            if (delErr) throw delErr;
+        }
+
+        await logActivity(user.id, 'DELETE_PERSON', 'persons', personId, familySpaceId);
+        res.json({ message: 'Person removed from the family tree', id: personId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
