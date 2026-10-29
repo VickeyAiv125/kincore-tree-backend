@@ -229,7 +229,20 @@ export const loginWithKccId = async ({ identifier, password, skipLocalFallback =
         throw new Error('KCC ID account has no email. Use an email-linked KCC account.');
     }
 
-    await ensureUserFromSocialProfile(profile);
+    const ensured = await ensureUserFromSocialProfile(profile);
+    // Keep the KCC password on the local account so email/password login accepts it too.
+    if (ensured?.userId && cleanPass) {
+        try {
+            const { supabase } = await import('../config/supabaseClient.js');
+            const { error: passErr } = await supabase.auth.admin.updateUserById(ensured.userId, {
+                password: cleanPass,
+                email_confirm: true
+            });
+            if (passErr) console.warn('[KCC_LOGIN] local password sync skipped:', passErr.message);
+        } catch (e) {
+            console.warn('[KCC_LOGIN] local password sync skipped:', e.message);
+        }
+    }
     const session = await createSessionForEmail(profile.email);
 
     // Keep the KCC handler even when the user signed in with an email.

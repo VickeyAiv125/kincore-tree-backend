@@ -663,15 +663,21 @@ export const AuthService = {
         const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
 
         if (error) {
-            // A KCC handler is not a local password. Sign that account in through KCC ID.
+            // KCC accounts are created without a local password. The same email and
+            // password should still sign in here, then get saved for the next attempt.
             const typed = String(identifier || email || '').trim();
-            if (typed && !typed.includes('@')) {
+            const kccId = cleanEmail.includes('@') ? cleanEmail : typed;
+            if (kccId) {
                 const { loginWithKccId } = await import('./kccAuthService.js');
-                return loginWithKccId({
-                    identifier: cleanEmail.includes('@') ? cleanEmail : typed,
-                    password,
-                    skipLocalFallback: true,
-                });
+                try {
+                    return await loginWithKccId({
+                        identifier: kccId,
+                        password,
+                        skipLocalFallback: true,
+                    });
+                } catch (kccErr) {
+                    if (kccErr?.status === 429 || kccErr?.requires_2fa) throw kccErr;
+                }
             }
             throw error;
         }
