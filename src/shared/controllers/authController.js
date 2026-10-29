@@ -142,8 +142,6 @@ export const googleAuthCallback = async (req, res) => {
     try {
         const { code, state, error, error_description: errorDescription } = req.query;
         const stateMeta = consumeGoogleOAuthState(String(state || ''));
-        clientType = stateMeta?.clientType || 'web';
-        redirectTo = stateMeta?.redirectTo || null;
 
         if (error) {
             throw new Error(errorDescription || error || 'Google authorization was denied');
@@ -151,8 +149,11 @@ export const googleAuthCallback = async (req, res) => {
         if (!code) throw new Error('Missing authorization code from Google');
         const codeStr = String(code);
         if (!stateMeta) {
-            throw new Error('Invalid or expired Google sign-in state. Please try again.');
+            throw new Error('Invalid or expired Google sign-in state. Close the browser and tap Google again in the app.');
         }
+
+        clientType = stateMeta.clientType || 'web';
+        redirectTo = stateMeta.redirectTo || null;
         const expectedBase = resolveOAuthRedirectBase({ clientType, redirectTo });
         const cachedRedirect = getCachedOAuthRedirectForCode(codeStr);
         if (cachedRedirect && cachedRedirect.startsWith(expectedBase)) {

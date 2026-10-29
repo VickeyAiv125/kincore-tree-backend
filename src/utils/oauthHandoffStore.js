@@ -14,6 +14,7 @@ const FILE = process.env.OAUTH_STORE_PATH || '/app/oauth-handoff/kincore-oauth-s
 const empty = () => ({
     redirects: {},
     tickets: {},
+    googleStates: {},
     facebookStates: {},
     facebookPending: {},
     facebookPendingByEmail: {}
@@ -58,6 +59,7 @@ const withStore = (mutator, options = {}) => {
     const keepPending = options.keepPendingKeys || [];
     pruneBucket(data.redirects, now);
     pruneBucket(data.tickets, now);
+    pruneBucket(data.googleStates, now);
     pruneBucket(data.facebookStates, now);
     pruneBucket(data.facebookPending, now, FACEBOOK_PENDING_TTL_MS, keepPending);
     pruneBucket(data.facebookPendingByEmail, now, FACEBOOK_PENDING_TTL_MS);
@@ -118,6 +120,28 @@ export const readOAuthHandoffTicket = (ticket) => {
 };
 
 export const consumeOAuthHandoffTicket = readOAuthHandoffTicket;
+
+export const saveGoogleOAuthState = (state, meta = {}) => {
+    const key = String(state || '').trim();
+    if (!key) return;
+    withStore((data, now) => {
+        data.googleStates[key] = { ...meta, createdAt: now };
+    });
+};
+
+export const consumeGoogleOAuthStateRecord = (state) => {
+    const key = String(state || '').trim();
+    if (!key) return null;
+
+    const signed = verifyOAuthPayload(key);
+    if (signed) return signed;
+
+    return withStore((data) => {
+        const meta = data.googleStates[key] || null;
+        if (meta) delete data.googleStates[key];
+        return meta;
+    });
+};
 
 export const saveFacebookOAuthState = (state, meta = {}) => {
     const key = String(state || '').trim();

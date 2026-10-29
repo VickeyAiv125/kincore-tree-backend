@@ -4,8 +4,13 @@
  */
 import crypto from 'crypto';
 import { supabase } from '../config/supabaseClient.js';
+import { signOAuthPayload, verifyOAuthPayload } from '../utils/oauthSignedPayload.js';
+import {
+    consumeGoogleOAuthStateRecord,
+    saveGoogleOAuthState
+} from '../utils/oauthHandoffStore.js';
 
-const STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_TTL_MS = 15 * 60 * 1000;
 const pendingStates = new Map();
 
 const pruneStates = () => {
@@ -37,17 +42,34 @@ export const getGoogleClientConfig = () => {
 };
 
 export const createGoogleOAuthState = (meta = {}) => {
+    const signed = signOAuthPayload(
+        { ...meta, nonce: crypto.randomBytes(12).toString('hex') },
+        STATE_TTL_MS
+    );
+    if (signed) return signed;
+
     pruneStates();
     const state = crypto.randomBytes(24).toString('hex');
-    pendingStates.set(state, { createdAt: Date.now(), ...meta });
+    const row = { createdAt: Date.now(), ...meta };
+    pendingStates.set(state, row);
+    saveGoogleOAuthState(state, row);
     return state;
 };
 
 export const consumeGoogleOAuthState = (state) => {
+    const key = String(state || '').trim();
+    if (!key) return null;
+
+    const signed = verifyOAuthPayload(key);
+    if (signed) return signed;
+
+    const fromDisk = consumeGoogleOAuthStateRecord(key);
+    if (fromDisk) return fromDisk;
+
     pruneStates();
-    if (!state || !pendingStates.has(state)) return null;
-    const meta = pendingStates.get(state);
-    pendingStates.delete(state);
+    if (!pendingStates.has(key)) return null;
+    const meta = pendingStates.get(key);
+    pendingStates.delete(key);
     return meta;
 };
 
