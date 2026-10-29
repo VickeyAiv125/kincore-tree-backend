@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabaseClient.js';
 import { uploadFile, BUCKETS } from '../config/storageClient.js';
+import { requiredFieldMessage } from '../shared/utils/userFacingField.js';
 
 const EVENT_COLUMNS = new Set([
     'family_space_id',
@@ -372,9 +373,18 @@ export const EventService = {
             ...insertData 
         } = eventData;
 
-        if (!insertData.family_space_id) throw new Error('family_space_id is required');
-        if (!insertData.title) throw new Error('title is required');
-        if (!insertData.start_date) throw new Error('start_date is required');
+        if (!insertData.start_date) {
+            insertData.start_date =
+                draw_date
+                || insertData.join_deadline
+                || gift_deadline
+                || insertData.rsvp_deadline
+                || null;
+        }
+
+        if (!insertData.family_space_id) throw new Error(requiredFieldMessage('family_space_id'));
+        if (!insertData.title) throw new Error(requiredFieldMessage('title'));
+        if (!insertData.start_date) throw new Error(requiredFieldMessage('start_date'));
 
         const includeGift = toBool(insertData.include_gift_exchange) || toBool(is_secret_santa);
         const sendReminders = toBool(insertData.send_reminders);
