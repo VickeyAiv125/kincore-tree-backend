@@ -275,9 +275,46 @@ const classifyFacebookProfile = async (profile) => {
     return { action: 'register', email: profile.email };
 };
 
+const slimProfileForPending = (profile) => {
+    if (!profile || typeof profile !== 'object') return profile;
+    return {
+        sub: profile.sub,
+        email: profile.email || '',
+        emailVerified: profile.emailVerified,
+        firstName: profile.firstName || '',
+        lastName: profile.lastName || '',
+        fullName: profile.fullName || '',
+        provider: profile.provider || 'facebook'
+    };
+};
+
+const slimPendingForSign = (row) => {
+    const next = { ...row };
+    if (next.profile) next.profile = slimProfileForPending(next.profile);
+    return next;
+};
+
+/** Disk backup so OTP verify survives long signed tokens / container restarts. */
+const persistPendingBackup = (row) => {
+    const email = String(row.pendingEmail || row.email || '').trim().toLowerCase();
+    if (email.includes('@')) {
+        const id = `fbmail:${crypto.createHash('sha256').update(email).digest('hex').slice(0, 32)}`;
+        saveFacebookPending(id, row);
+        return id;
+    }
+    const sub = String(row.profile?.sub || '').trim();
+    if (sub) {
+        const id = `fbprof:${crypto.createHash('sha256').update(sub).digest('hex').slice(0, 32)}`;
+        saveFacebookPending(id, row);
+        return id;
+    }
+    return null;
+};
+
 const savePending = (row) => {
     const payload = { ...row, createdAt: Date.now() };
-    const signed = signOAuthPayload(payload, FACEBOOK_PENDING_TTL_MS);
+    persistPendingBackup(payload);
+    const signed = signOAuthPayload(slimPendingForSign(payload), FACEBOOK_PENDING_TTL_MS);
     if (signed) return signed;
 
     const id = crypto.randomBytes(24).toString('hex');
@@ -295,7 +332,8 @@ const readPending = (tokenOrId) => {
 
 const writePending = (_tokenOrId, row) => {
     const payload = { ...row, updatedAt: Date.now() };
-    const signed = signOAuthPayload(payload, FACEBOOK_PENDING_TTL_MS);
+    persistPendingBackup(payload);
+    const signed = signOAuthPayload(slimPendingForSign(payload), FACEBOOK_PENDING_TTL_MS);
     if (signed) return signed;
 
     const id = String(_tokenOrId || '').trim() || crypto.randomBytes(24).toString('hex');
@@ -470,25 +508,39 @@ export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, cod
 };
 
 const resolveFacebookPending = (body = {}) => {
+    const recoveryEmail = String(body.pending_email || body.email || '').trim().toLowerCase();
     let pendingId = String(body.pending_token || body.pending_id || '').trim();
     let pending = pendingId ? readPending(pendingId) : null;
-    if (!pending) {
-        const recoveryEmail = String(body.pending_email || body.email || '').trim().toLowerCase();
+
+    if (!pending && recoveryEmail.includes('@')) {
         const recovered = readFacebookPendingByEmail(recoveryEmail);
         if (recovered?.row) {
             pending = recovered.row;
             pendingId = recovered.id;
         }
     }
+
+    if (!pending && recoveryEmail.includes('@')) {
+        const id = `fbmail:${crypto.createHash('sha256').update(recoveryEmail).digest('hex').slice(0, 32)}`;
+        pending = readFacebookPending(id);
+        if (pending) pendingId = id;
+    }
+
     return { pending, pendingId };
 };
 
 export const continueFacebookSignIn = async (body = {}) => {
+    const recoveryEmail = String(body.pending_email || body.email || '').trim().toLowerCase();
     const { pending, pendingId } = resolveFacebookPending(body);
     if (!pending || !pendingId) {
-        throw new Error('This Facebook sign-in expired. Return to Kincore and tap Facebook again.');
+        throw new Error(
+            'This Facebook sign-in expired. Return to Kincore and tap Facebook again (do not refresh this page).'
+        );
     }
-    const fail = (message) => ({ kind: 'html', html: pageForPending(pendingId, pending, message) });
+    const fail = (message) => {
+        const freshToken = writePending(pendingId, pending);
+        return { kind: 'html', html: pageForPending(freshToken, pending, message) };
+    };
     const action = String(body.action || pending.action || '');
 
     if (action === 'request_email') {
@@ -514,9 +566,14 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.emailVerified = true;
         const existing = await findUserByEmail(pending.email);
         pending.userId = existing?.id || null;
+        pending.action = 'verify_email';
         writePending(pendingId, pending);
         try {
-            return await completeFacebookSignIn(pending, pendingId);
+            const outcome = await completeFacebookSignIn(pending, pendingId);
+            if (recoveryEmail.includes('@')) {
+                deleteFacebookPending(`fbmail:${crypto.createHash('sha256').update(recoveryEmail).digest('hex').slice(0, 32)}`);
+            }
+            return outcome;
         } catch (err) {
             return fail(err.message);
         }
