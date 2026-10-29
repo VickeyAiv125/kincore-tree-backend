@@ -366,14 +366,13 @@ const sendFacebookOtp = async ({ to, otp, firstName }) => {
 };
 
 /**
- * Facebook already linked → sign in.
- * Email matches an existing KCC ID → ask for that password, then link.
+ * Facebook already linked, or its email matches an existing account → sign in and link.
  * No match → registration.
  * No email from Facebook → collect and verify an email first.
  */
 export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, code }) => {
     const decision = await classifyFacebookProfile(profile);
-    if (decision.action === 'login') {
+    if (decision.action === 'login' || decision.action === 'link') {
         const token = await issueFacebookSession({
             email: decision.email,
             clientType,
