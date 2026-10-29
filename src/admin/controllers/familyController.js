@@ -2858,6 +2858,203 @@ export const getReportData = async (req, res) => {
     }
 };
 
+const migrationYearOf = (value) => {
+    if (!value) return null;
+    const year = new Date(value).getUTCFullYear();
+    return Number.isNaN(year) ? null : year;
+};
+
+const migrationMediaCover = (media) => {
+    if (!Array.isArray(media) || !media.length) return null;
+    const item = media[0];
+    if (typeof item === 'string') return item;
+    return item?.url || item?.media_url || null;
+};
+
+const migrationGallery = (media) => {
+    if (!Array.isArray(media)) return [];
+    return media
+        .map((item) => {
+            if (typeof item === 'string') return { url: item, name: '', type: 'image' };
+            if (!item?.url) return null;
+            return {
+                url: item.url,
+                name: item.name || '',
+                type: item.type || 'image'
+            };
+        })
+        .filter(Boolean);
+};
+
+const formatMigrationStoryDate = (point) => {
+    if (point?.date_value) {
+        const d = new Date(point.date_value);
+        if (!Number.isNaN(d.getTime())) {
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        }
+    }
+    if (point?.approximate_period) return String(point.approximate_period);
+    return null;
+};
+
+const assertFamilyMember = async (familySpaceId, userId) => {
+    const { data: membership, error: memError } = await supabase
+        .from('family_memberships')
+        .select('role')
+        .eq('family_space_id', familySpaceId)
+        .eq('user_id', userId)
+        .single();
+    if (memError || !membership) {
+        return null;
+    }
+    return membership;
+};
+
+/**
+ * Full story payload for migration map "History Details" webview screen.
+ * GET /api/families/:id/migration-map/stories/:storyId
+ */
+export const getMigrationMapStoryDetail = async (req, res) => {
+    try {
+        const { id: familySpaceId, storyId } = req.params;
+        const userId = req.user?.id;
+        const membership = await assertFamilyMember(familySpaceId, userId);
+        if (!membership) {
+            return res.status(403).json({ error: 'Access denied: You are not a member of this family space' });
+        }
+
+        if (String(storyId).startsWith('profile-')) {
+            const profileId = String(storyId).slice('profile-'.length);
+            const { data: profile, error: profileError } = await supabase
+                .from('users')
+                .select('id, first_name, last_name, bio, date_of_birth, place_of_birth, avatar_url, created_at')
+                .eq('id', profileId)
+                .maybeSingle();
+            if (profileError) throw profileError;
+            if (!profile) return res.status(404).json({ error: 'Story not found' });
+
+            const personName = `${profile.first_name || ''} ${profile.last_name || ''}`.trim();
+            const dob = profile.date_of_birth
+                ? new Date(profile.date_of_birth).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                : null;
+
+            return res.json({
+                id: storyId,
+                source: 'profile',
+                badge: 'Migration Story',
+                title: personName ? `${personName}'s story` : 'Profile story',
+                body: profile.bio || '',
+                cover_image: profile.avatar_url || null,
+                gallery: profile.avatar_url ? [{ url: profile.avatar_url, name: personName, type: 'image' }] : [],
+                date_label: dob,
+                route_label: profile.place_of_birth || '',
+                person_name: personName,
+                author: {
+                    name: personName,
+                    avatar_url: profile.avatar_url || null,
+                    subtitle: 'Family member'
+                },
+                next_story: null
+            });
+        }
+
+        const { data: point, error: pointError } = await supabase
+            .from('migration_points')
+            .select('*')
+            .eq('id', storyId)
+            .eq('family_space_id', familySpaceId)
+            .maybeSingle();
+
+        if (pointError) throw pointError;
+        if (!point) return res.status(404).json({ error: 'Story not found' });
+
+        const { data: trees } = await supabase.from('clan_trees').select('id').eq('family_space_id', familySpaceId);
+        const treeIds = trees?.map((t) => t.id) || [];
+        const personNames = {};
+        if (treeIds.length > 0) {
+            const { data: persons } = await supabase
+                .from('persons')
+                .select('id, full_name')
+                .in('clan_tree_id', treeIds);
+            (persons || []).forEach((person) => {
+                personNames[person.id] = person.full_name;
+            });
+        }
+
+        const linked = Array.isArray(point.persons) ? point.persons : [];
+        const personName = linked.map((id) => personNames[id]).find(Boolean) || '';
+
+        let chapter = null;
+        const chapterIds = Array.isArray(point.history_chapters) ? point.history_chapters : [];
+        if (chapterIds.length > 0) {
+            const { data: chapterRow } = await supabase
+                .from('family_history')
+                .select('*')
+                .eq('id', chapterIds[0])
+                .maybeSingle();
+            chapter = chapterRow;
+        }
+
+        const fromLoc = point.from_location || '';
+        const toLoc = point.to_location || '';
+        const routeLabel = fromLoc && toLoc ? `${fromLoc} → ${toLoc}` : (toLoc || fromLoc || '');
+
+        const cover = chapter?.cover_image || migrationMediaCover(point.media);
+        const gallery = migrationGallery(point.media);
+        if (chapter?.cover_image && !gallery.some((g) => g.url === chapter.cover_image)) {
+            gallery.unshift({ url: chapter.cover_image, name: chapter.title || 'Cover', type: 'image' });
+        }
+
+        const { data: allPoints } = await supabase
+            .from('migration_points')
+            .select('id, title, date_value, approximate_period, to_location, from_location, description')
+            .eq('family_space_id', familySpaceId)
+            .order('date_value', { ascending: true, nullsFirst: false });
+
+        const storyRows = (allPoints || [])
+            .filter((row) => String(row.description || '').trim() || row.id === point.id)
+            .map((row) => ({
+                id: row.id,
+                year: migrationYearOf(row.date_value)
+                    || (row.approximate_period ? Number(String(row.approximate_period).slice(0, 4)) || null : null),
+                title: row.title || 'Migration',
+                route: row.from_location && row.to_location
+                    ? `${row.from_location} → ${row.to_location}`
+                    : (row.to_location || row.from_location || '')
+            }));
+
+        const index = storyRows.findIndex((row) => row.id === point.id);
+        const nextStory = index >= 0 && index < storyRows.length - 1 ? storyRows[index + 1] : null;
+
+        res.json({
+            id: point.id,
+            source: 'migration',
+            badge: 'Migration Story',
+            title: chapter?.title || point.title || 'Migration',
+            body: (chapter?.content || point.description || '').trim(),
+            cover_image: cover,
+            gallery,
+            date_label: formatMigrationStoryDate(point),
+            year: migrationYearOf(point.date_value),
+            route_label: routeLabel,
+            person_name: personName,
+            reason: point.reason || null,
+            author: personName
+                ? { name: personName, avatar_url: null, subtitle: 'Family member' }
+                : null,
+            next_story: nextStory
+                ? {
+                    id: nextStory.id,
+                    title: nextStory.title,
+                    subtitle: [nextStory.year, nextStory.route].filter(Boolean).join(' • ')
+                }
+                : null
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
 /**
  * Get family space migration map data for general members.
  */
@@ -2867,14 +3064,8 @@ export const getFamilyMigrationMap = async (req, res) => {
 
         // Verify membership of requesting user
         const userId = req.user?.id;
-        const { data: membership, error: memError } = await supabase
-            .from('family_memberships')
-            .select('role')
-            .eq('family_space_id', familySpaceId)
-            .eq('user_id', userId)
-            .single();
-
-        if (memError || !membership) {
+        const membership = await assertFamilyMember(familySpaceId, userId);
+        if (!membership) {
             return res.status(403).json({ error: 'Access denied: You are not a member of this family space' });
         }
 
@@ -2921,25 +3112,20 @@ export const getFamilyMigrationMap = async (req, res) => {
             profiles = profileRows || [];
         }
 
-        const yearOfDate = (value) => {
-            if (!value) return null;
-            const year = new Date(value).getUTCFullYear();
-            return Number.isNaN(year) ? null : year;
-        };
-
         const stories = [];
         for (const point of migrationPoints || []) {
             const linked = Array.isArray(point.persons) ? point.persons : [];
             const personName = linked.map((id) => personNames[id]).find(Boolean) || '';
             stories.push({
                 id: point.id,
-                year: yearOfDate(point.date_value) || (point.approximate_period ? Number(String(point.approximate_period).slice(0, 4)) || null : null),
+                year: migrationYearOf(point.date_value) || (point.approximate_period ? Number(String(point.approximate_period).slice(0, 4)) || null : null),
                 location: point.to_location || point.from_location || '',
                 title: point.title || 'Migration',
                 person_name: personName,
                 body: point.description || '',
-                image: null,
-                source: 'migration'
+                image: migrationMediaCover(point.media),
+                source: 'migration',
+                has_detail: true
             });
         }
         for (const profile of profiles) {
@@ -2948,7 +3134,7 @@ export const getFamilyMigrationMap = async (req, res) => {
             const personName = `${profile.first_name || ''} ${profile.last_name || ''}`.trim();
             stories.push({
                 id: `profile-${profile.id}`,
-                year: yearOfDate(profile.date_of_birth),
+                year: migrationYearOf(profile.date_of_birth),
                 location: profile.place_of_birth || '',
                 title: personName ? `${personName}'s story` : 'Profile story',
                 person_name: personName,

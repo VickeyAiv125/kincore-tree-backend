@@ -27,6 +27,7 @@ import {
     updateCustomLabels,
     getReportData,
     getFamilyMigrationMap,
+    getMigrationMapStoryDetail,
     getFamilySubscription,
     updateFamilySubscription,
     exportFamilySpaceData,
@@ -124,6 +125,7 @@ router.delete('/events/:eventId', authMiddleware, deleteEventById);
 router.get('/:id/reports', authMiddleware, requireFamilyRole('id', ['owner', 'admin']), getReportData);
 
 // Migration Map public/member route for mobile app/webview
+router.get('/:id/migration-map/stories/:storyId', authMiddleware, getMigrationMapStoryDetail);
 router.get('/:id/migration-map', authMiddleware, getFamilyMigrationMap);
 
 export default router;
