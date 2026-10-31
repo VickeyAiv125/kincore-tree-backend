@@ -260,19 +260,31 @@ const issueFacebookSession = async ({ email, clientType, profile, userId }) => {
     return result.token;
 };
 
-const classifyFacebookProfile = async (profile) => {
-    const linked = await findAuthUserByFacebookSub(profile.sub);
-    if (linked?.email && isUsableFacebookEmail(linked.email)) {
-        return { action: 'login', email: String(linked.email).trim().toLowerCase(), userId: linked.id };
+/** Issue 7: linked → login; email matches unlinked KCC → confirm; none → register; no email → collect. */
+export const decideFacebookAction = ({ linkedUser, profileEmail, existingUserByEmail }) => {
+    const linkedEmail = String(linkedUser?.email || '').trim().toLowerCase();
+    if (linkedUser?.id && linkedEmail.includes('@')) {
+        return { action: 'login', email: linkedEmail, userId: linkedUser.id };
     }
-    if (!isUsableFacebookEmail(profile.email)) {
+    const email = String(profileEmail || '').trim().toLowerCase();
+    if (!isUsableFacebookEmail(email)) {
         return { action: 'need_email' };
     }
-    const existing = await findUserByEmail(profile.email);
-    if (existing?.id) {
-        return { action: 'link', email: profile.email, userId: existing.id };
+    if (existingUserByEmail?.id) {
+        return { action: 'confirm_link', email, userId: existingUserByEmail.id };
     }
-    return { action: 'register', email: profile.email };
+    return { action: 'register', email };
+};
+
+const classifyFacebookProfile = async (profile) => {
+    const linked = await findAuthUserByFacebookSub(profile.sub);
+    const email = String(profile.email || '').trim().toLowerCase();
+    const existing = isUsableFacebookEmail(email) ? await findUserByEmail(email) : null;
+    return decideFacebookAction({
+        linkedUser: linked,
+        profileEmail: email,
+        existingUserByEmail: existing
+    });
 };
 
 const slimProfileForPending = (profile) => {
@@ -400,6 +412,17 @@ const pageForPending = (pendingId, pending, error = '') => {
             submitLabel: 'Verify email'
         });
     }
+    if (pending.action === 'confirm_link' || pending.action === 'link') {
+        return stepPage({
+            title: 'Confirm Facebook linking',
+            intro: `This Facebook email matches an existing KCC ID (${pending.email}). Sign in to that account, then confirm linking Facebook.`,
+            error,
+            pendingId,
+            hidden: { action: 'confirm_link' },
+            fields: '<label>Password for this KCC ID</label><input name="password" type="password" autocomplete="current-password" required />',
+            submitLabel: 'Sign in and link Facebook'
+        });
+    }
     return stepPage({
         title: 'Finish Facebook sign-in',
         intro: 'We could not finish automatically. Close this page, return to Kincore, and tap Facebook again.',
@@ -468,13 +491,14 @@ const sendFacebookOtp = async ({ to, otp, firstName }) => {
 };
 
 /**
- * Facebook already linked, or its email matches an existing account → sign in and link.
+ * Facebook already linked → log in to that KCC ID.
+ * Email matches an unlinked KCC ID → ask the user to sign in, then confirm linking.
  * No match → registration.
  * No email from Facebook → collect and verify an email first.
  */
 export const beginFacebookSignIn = async ({ profile, clientType, redirectTo, code }) => {
     const decision = await classifyFacebookProfile(profile);
-    if (decision.action === 'login' || decision.action === 'link') {
+    if (decision.action === 'login') {
         const token = await issueFacebookSession({
             email: decision.email,
             clientType,
@@ -566,7 +590,12 @@ export const continueFacebookSignIn = async (body = {}) => {
         pending.emailVerified = true;
         const existing = await findUserByEmail(pending.email);
         pending.userId = existing?.id || null;
-        pending.action = 'verify_email';
+        if (existing?.id) {
+            pending.action = 'confirm_link';
+            const nextToken = writePending(pendingId, pending);
+            return { kind: 'html', html: pageForPending(nextToken, pending) };
+        }
+        pending.action = 'register';
         writePending(pendingId, pending);
         try {
             const outcome = await completeFacebookSignIn(pending, pendingId);
@@ -579,7 +608,27 @@ export const continueFacebookSignIn = async (body = {}) => {
         }
     }
 
-    if (action === 'link' || action === 'register') {
+    if (action === 'confirm_link' || action === 'link') {
+        const password = String(body.password || '');
+        if (!password) return fail('Enter the password for this KCC ID.');
+        try {
+            const { AuthService } = await import('./authService.js');
+            await AuthService.login({
+                email: pending.email,
+                password,
+                identifier: pending.email
+            });
+        } catch (err) {
+            return fail(err.message || 'That password is incorrect. Sign in to the existing KCC ID, then confirm linking Facebook.');
+        }
+        try {
+            return await completeFacebookSignIn(pending, pendingId);
+        } catch (err) {
+            return fail(err.message);
+        }
+    }
+
+    if (action === 'register') {
         try {
             return await completeFacebookSignIn(pending, pendingId);
         } catch (err) {
