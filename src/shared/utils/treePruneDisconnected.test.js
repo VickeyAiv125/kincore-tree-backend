@@ -46,6 +46,22 @@ describe('collectDisconnectedPersonIds', () => {
         assert.deepEqual(pruned, ['claimedLeaf']);
     });
 
+    it('removing VP drops VW and VC when they only connect through VP', () => {
+        const pruned = collectDisconnectedPersonIds({
+            personIds: ['smit', 'rinkal', 'tirth', 'VP', 'VW', 'VC'],
+            relations: [
+                { person_id_1: 'rinkal', person_id_2: 'smit', relation_type: 'spouse' },
+                { person_id_1: 'smit', person_id_2: 'tirth', relation_type: 'parent' },
+                { person_id_1: 'VP', person_id_2: 'smit', relation_type: 'member' },
+                { person_id_1: 'VP', person_id_2: 'VW', relation_type: 'spouse' },
+                { person_id_1: 'VP', person_id_2: 'VC', relation_type: 'parent' }
+            ],
+            removedPersonId: 'VP',
+            anchorPersonIds: ['smit']
+        });
+        assert.deepEqual(pruned.sort(), ['VC', 'VW']);
+    });
+
     it('uses the largest remaining component as the main tree when there is no anchor', () => {
         const pruned = collectDisconnectedPersonIds({
             personIds: ['A', 'B', 'C', 'D'],
