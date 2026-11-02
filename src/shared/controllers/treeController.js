@@ -565,9 +565,6 @@ export const addFamilyMember = async (req, res) => {
                 sourceId = target_person_id;
                 targetId = personId;
                 type = 'parent';
-            } else if (type === 'member' || type === 'father' || type === 'mother') {
-                // Stored the same way as add-parent: new person → selected person.
-                type = 'parent';
             }
 
             const { error: rError } = await supabase
@@ -920,21 +917,15 @@ export const getTreeData = async (req, res) => {
             if (relIdsSeen.has(r.id)) return false;
             relIdsSeen.add(r.id);
             return true;
-        }).map(r => {
-            const rawType = String(r.relation_type || '').toLowerCase();
-            const familyType = (rawType === 'member' || rawType === 'father' || rawType === 'mother')
-                ? 'parent'
-                : r.relation_type;
-            return {
-                id: r.id,
-                person_id: r.person_id_1,
-                related_person_id: r.person_id_2,
-                relationship_type: familyType,
-                relation_type: familyType,
-                clan_tree_id: r.clan_tree_id,
-                family_space_id,
-            };
-        });
+        }).map(r => ({
+            id: r.id,
+            person_id: r.person_id_1,
+            related_person_id: r.person_id_2,
+            relationship_type: r.relation_type,
+            relation_type: r.relation_type,
+            clan_tree_id: r.clan_tree_id,
+            family_space_id,
+        }));
 
         // Also check person_relationships (legacy table from treeController.addChild/addParent)
         const { data: rels2 } = await supabase
