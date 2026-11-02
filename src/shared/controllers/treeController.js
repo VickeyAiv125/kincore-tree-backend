@@ -830,6 +830,11 @@ export const getTreeData = async (req, res) => {
             allPersons.filter(p => p.claimed_by).map(p => p.claimed_by)
         );
         const personIdsSet = new Set(allPersons.map(p => p.id));
+        const removedFromTreeUserIds = new Set(
+            [...(pDirect || []), ...personsFromTree]
+                .filter((p) => p.status === 'deleted' && p.claimed_by)
+                .map((p) => p.claimed_by)
+        );
 
         if (memberships && memberships.length > 0) {
             // Step B: get user profile details for those user_ids
@@ -852,8 +857,9 @@ export const getTreeData = async (req, res) => {
 
             for (const m of memberships) {
                 if (!m.user_id) continue; // skip null user_ids
-                // Skip if this member already has a person node
+                // Skip if this member already has a person node, or was removed from the tree
                 if (claimedUserIds.has(m.user_id) || personIdsSet.has(m.user_id)) continue;
+                if (removedFromTreeUserIds.has(m.user_id)) continue;
                 const u = userMap.get(m.user_id) || {};
                 const firstName = u.first_name || '';
                 const lastName = u.last_name || '';
@@ -1054,10 +1060,10 @@ const removePersonRecord = async (personRow) => {
     if (error) throw error;
 };
 
-const loadFamilyTreeGraph = async (familySpaceId) => {
+const loadFamilyTreeGraph = async (familySpaceId, currentUserId = null) => {
     const { data: persons, error: personsErr } = await supabase
         .from('persons')
-        .select('id, claimed_by, role, status')
+        .select('id, claimed_by, role, status, clan_tree_id')
         .eq('family_space_id', familySpaceId);
     if (personsErr) throw personsErr;
 
@@ -1066,17 +1072,29 @@ const loadFamilyTreeGraph = async (familySpaceId) => {
     let relations = [];
     if (ids.length) {
         const inList = ids.join(',');
-        const [{ data: rels }, { data: rels2 }] = await Promise.all([
+        const treeIds = [...new Set(activePersons.map((p) => p.clan_tree_id).filter(Boolean))];
+        const [{ data: relsByPerson }, { data: relsByTree }, { data: rels2 }] = await Promise.all([
             supabase
                 .from('person_relations')
                 .select('id, person_id_1, person_id_2, relation_type')
                 .or(`person_id_1.in.(${inList}),person_id_2.in.(${inList})`),
+            treeIds.length
+                ? supabase
+                    .from('person_relations')
+                    .select('id, person_id_1, person_id_2, relation_type')
+                    .in('clan_tree_id', treeIds)
+                : Promise.resolve({ data: [] }),
             supabase
                 .from('person_relationships')
                 .select('id, person_id, related_person_id, relationship_type')
                 .eq('family_space_id', familySpaceId)
         ]);
-        relations = [...(rels || []), ...(rels2 || [])];
+        const seen = new Set();
+        relations = [...(relsByPerson || []), ...(relsByTree || []), ...(rels2 || [])].filter((r) => {
+            if (!r?.id || seen.has(r.id)) return false;
+            seen.add(r.id);
+            return true;
+        });
     }
 
     const { data: space } = await supabase
@@ -1091,13 +1109,15 @@ const loadFamilyTreeGraph = async (familySpaceId) => {
     const rootPersonIds = activePersons
         .filter((p) => String(p.role || '').toLowerCase().includes('root'))
         .map((p) => p.id);
-    const claimedPersonIds = activePersons.filter((p) => p.claimed_by).map((p) => p.id);
+    const selfPersonIds = currentUserId
+        ? activePersons.filter((p) => p.claimed_by === currentUserId).map((p) => p.id)
+        : [];
 
     return {
         activePersons,
         personIds: ids,
         relations,
-        anchorPersonIds: [...ownerPersonIds, ...rootPersonIds, ...claimedPersonIds]
+        anchorPersonIds: [...ownerPersonIds, ...rootPersonIds, ...selfPersonIds]
     };
 };
 
@@ -1109,7 +1129,7 @@ const loadFamilyTreeGraph = async (familySpaceId) => {
 export const deletePerson = async (req, res) => {
     try {
         const { person_id: personId } = req.params;
-        const { family_space_id: familySpaceId } = req.body || {};
+        const familySpaceId = req.body?.family_space_id || req.query?.family_space_id;
         const { user, familyRole } = req;
 
         if (!familySpaceId || !personId) {
@@ -1150,12 +1170,19 @@ export const deletePerson = async (req, res) => {
             return res.status(202).json({ message: `Removal sent to ${governance.target} for approval.` });
         }
 
-        const graph = await loadFamilyTreeGraph(familySpaceId);
+        const graph = await loadFamilyTreeGraph(familySpaceId, user?.id);
         const disconnectedIds = collectDisconnectedPersonIds({
             personIds: graph.personIds,
             relations: graph.relations,
             removedPersonId: personId,
             anchorPersonIds: graph.anchorPersonIds
+        });
+        console.log('[DELETE_PERSON] prune', {
+            personId,
+            familySpaceId,
+            relationCount: graph.relations.length,
+            anchors: graph.anchorPersonIds,
+            disconnectedIds
         });
 
         await deleteRelationsForPerson(personId);

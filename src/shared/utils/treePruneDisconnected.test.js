@@ -36,6 +36,16 @@ describe('collectDisconnectedPersonIds', () => {
         assert.deepEqual(pruned, ['E']);
     });
 
+    it('prunes a claimed person if they are only connected through the removed node', () => {
+        const pruned = collectDisconnectedPersonIds({
+            personIds: ['owner', 'B', 'claimedLeaf'],
+            relations: [edge('owner', 'B'), edge('B', 'claimedLeaf')],
+            removedPersonId: 'B',
+            anchorPersonIds: ['owner']
+        });
+        assert.deepEqual(pruned, ['claimedLeaf']);
+    });
+
     it('uses the largest remaining component as the main tree when there is no anchor', () => {
         const pruned = collectDisconnectedPersonIds({
             personIds: ['A', 'B', 'C', 'D'],
