@@ -3,6 +3,7 @@ import { logActivity } from '../../utils/logger.js';
 import { sendEmail } from '../../services/emailService.js';
 import { assertParentChildDob } from '../utils/parentChildDob.js';
 import { enrichPersonWithAccountDob, fillPersonsDobFromUsers } from '../utils/personDobEnrichment.js';
+import { collectDisconnectedPersonIds } from '../utils/treePruneDisconnected.js';
 
 const PARENT_ROLES = new Set(['father', 'mother', 'parent']);
 const PARENT_LINKS = new Set(['biological', 'adoptive', 'step-parent', 'foster', 'guardian', 'unknown']);
@@ -1029,8 +1030,80 @@ export const getTreeData = async (req, res) => {
     }
 };
 
+const relationTouchingPerson = (personId) =>
+    `person_id_1.eq.${personId},person_id_2.eq.${personId}`;
+
+const legacyRelationTouchingPerson = (personId) =>
+    `person_id.eq.${personId},related_person_id.eq.${personId}`;
+
+const deleteRelationsForPerson = async (personId) => {
+    await supabase.from('person_relations').delete().or(relationTouchingPerson(personId));
+    await supabase.from('person_relationships').delete().or(legacyRelationTouchingPerson(personId));
+};
+
+const removePersonRecord = async (personRow) => {
+    if (personRow?.claimed_by) {
+        const { error } = await supabase
+            .from('persons')
+            .update({ status: 'deleted', updated_at: new Date().toISOString() })
+            .eq('id', personRow.id);
+        if (error) throw error;
+        return;
+    }
+    const { error } = await supabase.from('persons').delete().eq('id', personRow.id);
+    if (error) throw error;
+};
+
+const loadFamilyTreeGraph = async (familySpaceId) => {
+    const { data: persons, error: personsErr } = await supabase
+        .from('persons')
+        .select('id, claimed_by, role, status')
+        .eq('family_space_id', familySpaceId);
+    if (personsErr) throw personsErr;
+
+    const activePersons = (persons || []).filter((p) => p.status !== 'deleted');
+    const ids = activePersons.map((p) => p.id);
+    let relations = [];
+    if (ids.length) {
+        const inList = ids.join(',');
+        const [{ data: rels }, { data: rels2 }] = await Promise.all([
+            supabase
+                .from('person_relations')
+                .select('id, person_id_1, person_id_2, relation_type')
+                .or(`person_id_1.in.(${inList}),person_id_2.in.(${inList})`),
+            supabase
+                .from('person_relationships')
+                .select('id, person_id, related_person_id, relationship_type')
+                .eq('family_space_id', familySpaceId)
+        ]);
+        relations = [...(rels || []), ...(rels2 || [])];
+    }
+
+    const { data: space } = await supabase
+        .from('family_spaces')
+        .select('owner_id')
+        .eq('id', familySpaceId)
+        .maybeSingle();
+
+    const ownerPersonIds = activePersons
+        .filter((p) => space?.owner_id && p.claimed_by === space.owner_id)
+        .map((p) => p.id);
+    const rootPersonIds = activePersons
+        .filter((p) => String(p.role || '').toLowerCase().includes('root'))
+        .map((p) => p.id);
+    const claimedPersonIds = activePersons.filter((p) => p.claimed_by).map((p) => p.id);
+
+    return {
+        activePersons,
+        personIds: ids,
+        relations,
+        anchorPersonIds: [...ownerPersonIds, ...rootPersonIds, ...claimedPersonIds]
+    };
+};
+
 /**
  * Remove a person from the family tree (wrong add / cleanup).
+ * Also drops any branch that is no longer connected to the main family tree.
  * DELETE /clantree/person/:person_id  body: { family_space_id }
  */
 export const deletePerson = async (req, res) => {
@@ -1077,32 +1150,29 @@ export const deletePerson = async (req, res) => {
             return res.status(202).json({ message: `Removal sent to ${governance.target} for approval.` });
         }
 
-        await supabase
-            .from('person_relations')
-            .delete()
-            .or(`person_id_1.eq.${personId},person_id_2.eq.${personId}`);
+        const graph = await loadFamilyTreeGraph(familySpaceId);
+        const disconnectedIds = collectDisconnectedPersonIds({
+            personIds: graph.personIds,
+            relations: graph.relations,
+            removedPersonId: personId,
+            anchorPersonIds: graph.anchorPersonIds
+        });
 
-        await supabase
-            .from('person_relationships')
-            .delete()
-            .or(`person_id.eq.${personId},related_person_id.eq.${personId}`);
+        await deleteRelationsForPerson(personId);
+        await removePersonRecord(person);
 
-        if (person.claimed_by) {
-            const { error: softErr } = await supabase
-                .from('persons')
-                .update({ status: 'deleted', updated_at: new Date().toISOString() })
-                .eq('id', personId);
-            if (softErr) throw softErr;
-        } else {
-            const { error: delErr } = await supabase
-                .from('persons')
-                .delete()
-                .eq('id', personId);
-            if (delErr) throw delErr;
+        const extraRows = graph.activePersons.filter((p) => disconnectedIds.includes(p.id));
+        for (const extra of extraRows) {
+            await deleteRelationsForPerson(extra.id);
+            await removePersonRecord(extra);
         }
 
         await logActivity(user.id, 'DELETE_PERSON', 'persons', personId, familySpaceId);
-        res.json({ message: 'Person removed from the family tree', id: personId });
+        res.json({
+            message: 'Person removed from the family tree',
+            id: personId,
+            removed_disconnected_ids: disconnectedIds
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
